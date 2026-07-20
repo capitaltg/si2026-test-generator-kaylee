@@ -8,9 +8,26 @@ apart.
 from __future__ import annotations
 
 import argparse
+import json
 
 from . import __version__
 from .core import generate
+from .fields import available_field_types
+
+# A tiny example schema so `python -m testgen` shows something real right now.
+# This is NOT the official GovCon preset; that arrives (as a named, reusable
+# preset) in Ticket 4. For now it just demonstrates the engine end to end.
+EXAMPLE_SCHEMA = [
+    {"name": "contract_id", "type": "sequence", "prefix": "GS-", "start": 1000},
+    {"name": "vendor", "type": "company"},
+    {
+        "name": "agency",
+        "type": "choice",
+        "choices": ["Dept of Defense", "GSA", "Dept of Veterans Affairs", "NASA"],
+    },
+    {"name": "amount_usd", "type": "int", "min": 25000, "max": 5000000},
+    {"name": "awarded_on", "type": "date", "start": "2021-01-01", "end": "2024-12-31"},
+]
 
 
 def build_parser():
@@ -37,6 +54,11 @@ def build_parser():
         default=None,
         help="Seed for reproducible output. The same seed always gives the same data.",
     )
+    parser.add_argument(
+        "--list-types",
+        action="store_true",
+        help="List every available field type and exit.",
+    )
     return parser
 
 
@@ -49,6 +71,13 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    result = generate(rows=args.rows, seed=args.seed)
-    print(result)
+    if args.list_types:
+        for name in available_field_types():
+            print(name)
+        return 0
+
+    rows = generate(EXAMPLE_SCHEMA, rows=args.rows, seed=args.seed)
+    # default=str lets json print things it does not natively understand, like
+    # date objects, by falling back to their string form.
+    print(json.dumps(rows, indent=2, default=str))
     return 0

@@ -8,9 +8,10 @@ version = "0.1.0"
 description = "Generate realistic, reproducible fake test data (CSV, SQL, and PDFs)."
 readme = "README.md"
 requires-python = ">=3.9"
-# Runtime dependencies get added as tickets need them (Faker in Ticket 2,
-# a PDF library in Ticket 5). Kept empty for the scaffold so install is instant.
-dependencies = []
+# Runtime dependencies. Faker generates the individual realistic values
+# (names, companies, addresses); it is seedable, which keeps our output
+# reproducible. A PDF library gets added in Ticket 5.
+dependencies = ["Faker"]
 
 # This line is what turns `testgen` into a real terminal command after
 # `pip install .`. It says: when someone runs `testgen`, call the main()
