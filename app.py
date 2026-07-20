@@ -93,43 +93,43 @@ def render_options(field, fid):
     both used the same key, switching a column's type would reuse one key for two
     widget kinds and crash. Namespacing by type keeps them separate.
     """
-    t = field["type"]
+    field_type = field["type"]
     opts = field.setdefault("options", {})
 
-    def k(name):
-        return f"opt_{t}_{name}_{fid}"
+    def option_key(option_name):
+        return f"opt_{field_type}_{option_name}_{fid}"
 
-    if t in ("int", "money"):
-        default_lo, default_hi = (0, 100) if t == "int" else (1000, 1_000_000)
+    if field_type in ("int", "money"):
+        default_lo, default_hi = (0, 100) if field_type == "int" else (1000, 1_000_000)
         c1, c2 = st.columns(2)
         opts["min"] = c1.number_input(
-            "min", value=int(opts.get("min", default_lo)), key=k("min")
+            "min", value=int(opts.get("min", default_lo)), key=option_key("min")
         )
         opts["max"] = c2.number_input(
-            "max", value=int(opts.get("max", default_hi)), key=k("max")
+            "max", value=int(opts.get("max", default_hi)), key=option_key("max")
         )
-    elif t == "float":
+    elif field_type == "float":
         c1, c2, c3 = st.columns(3)
         opts["min"] = c1.number_input(
-            "min", value=float(opts.get("min", 0.0)), key=k("min")
+            "min", value=float(opts.get("min", 0.0)), key=option_key("min")
         )
         opts["max"] = c2.number_input(
-            "max", value=float(opts.get("max", 1.0)), key=k("max")
+            "max", value=float(opts.get("max", 1.0)), key=option_key("max")
         )
         opts["round"] = c3.number_input(
             "decimals",
             min_value=0,
             max_value=10,
             value=int(opts.get("round", 2)),
-            key=k("round"),
+            key=option_key("round"),
         )
-    elif t == "choice":
+    elif field_type == "choice":
         # The user types a comma-separated list; we split it into real choices.
         # We keep the raw text too so the box shows exactly what they typed.
         raw = st.text_input(
             "choices (comma-separated)",
             value=opts.get("choices_raw", ""),
-            key=k("choices"),
+            key=option_key("choices"),
             placeholder="Red, Green, Blue",
         )
         opts["choices_raw"] = raw
@@ -137,7 +137,7 @@ def render_options(field, fid):
         wraw = st.text_input(
             "weights (optional, one number per choice)",
             value=opts.get("weights_raw", ""),
-            key=k("weights"),
+            key=option_key("weights"),
             placeholder="e.g. 5, 3, 1",
         )
         opts["weights_raw"] = wraw
@@ -153,46 +153,51 @@ def render_options(field, fid):
         opts["weights"] = (
             numbers if numbers and len(numbers) == len(opts["choices"]) else None
         )
-    elif t == "date":
+    elif field_type == "date":
         c1, c2 = st.columns(2)
         start = c1.date_input(
             "start",
             value=datetime.date.fromisoformat(opts.get("start", "2000-01-01")),
-            key=k("start"),
+            key=option_key("start"),
         )
         end = c2.date_input(
             "end",
             value=datetime.date.fromisoformat(opts.get("end", "2025-12-31")),
-            key=k("end"),
+            key=option_key("end"),
         )
         # Store as ISO strings; the engine's date type accepts those directly.
         opts["start"] = start.isoformat()
         opts["end"] = end.isoformat()
-    elif t == "pattern":
+    elif field_type == "pattern":
         opts["pattern"] = st.text_input(
             "pattern  (# = digit, ? = letter)",
             value=opts.get("pattern", "CAGE-#####"),
-            key=k("pattern"),
+            key=option_key("pattern"),
         )
-    elif t == "constant":
+    elif field_type == "constant":
         opts["value"] = st.text_input(
-            "value (same on every row)", value=opts.get("value", ""), key=k("value")
+            "value (same on every row)",
+            value=opts.get("value", ""),
+            key=option_key("value"),
         )
-    elif t == "sequence":
+    elif field_type == "sequence":
         c1, c2 = st.columns(2)
         opts["prefix"] = c1.text_input(
-            "prefix", value=opts.get("prefix", ""), key=k("prefix"), placeholder="GS-"
+            "prefix",
+            value=opts.get("prefix", ""),
+            key=option_key("prefix"),
+            placeholder="GS-",
         )
         opts["start"] = c2.number_input(
-            "start", value=int(opts.get("start", 1)), key=k("start")
+            "start", value=int(opts.get("start", 1)), key=option_key("start")
         )
-    elif t == "bool":
+    elif field_type == "bool":
         opts["true_chance"] = st.slider(
             "chance of True",
             0.0,
             1.0,
             value=float(opts.get("true_chance", 0.5)),
-            key=k("true_chance"),
+            key=option_key("true_chance"),
         )
 
 
