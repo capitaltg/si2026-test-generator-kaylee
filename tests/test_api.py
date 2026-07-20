@@ -81,3 +81,53 @@ def test_export_unknown_format_is_400():
     body = {"fields": [{"name": "v", "type": "int"}], "rows": 1, "format": "xlsx"}
     resp = client.post("/export", json=body)
     assert resp.status_code == 400
+
+
+# --- schema builder endpoints ---
+
+
+def test_schema_from_ddl_endpoint():
+    ddl = "CREATE TABLE t (id UUID, email VARCHAR(120), salary DECIMAL(10,2));"
+    resp = client.post("/schema/from-ddl", json={"ddl": ddl})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["table"] == "t"
+    assert {field["name"]: field["type"] for field in data["fields"]}[
+        "email"
+    ] == "email"
+
+
+def test_schema_from_ddl_bad_input_is_400():
+    resp = client.post("/schema/from-ddl", json={"ddl": "not a ddl"})
+    assert resp.status_code == 400
+
+
+def test_schema_from_csv_endpoint():
+    resp = client.post("/schema/from-csv", json={"csv": "name,email,age"})
+    assert resp.status_code == 200
+    names = [field["name"] for field in resp.json()["fields"]]
+    assert names == ["name", "email", "age"]
+
+
+def test_schema_from_json_endpoint():
+    resp = client.post(
+        "/schema/from-json", json={"sample": '{"id":"x","verified":true}'}
+    )
+    assert resp.status_code == 200
+    assert {field["name"]: field["type"] for field in resp.json()["fields"]}[
+        "verified"
+    ] == "bool"
+
+
+def test_schema_from_json_invalid_is_400():
+    resp = client.post("/schema/from-json", json={"sample": "{broken"})
+    assert resp.status_code == 400
+
+
+def test_schema_from_description_endpoint():
+    resp = client.post(
+        "/schema/from-description", json={"text": "name, email, and city"}
+    )
+    assert resp.status_code == 200
+    names = {field["name"] for field in resp.json()["fields"]}
+    assert "email" in names and "id" in names

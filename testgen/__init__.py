@@ -13,6 +13,13 @@ from __future__ import annotations
 
 from .core import generate
 from .fields import available_field_types, field_type_groups, register_field_type
+from .infer import (
+    from_csv_headers,
+    from_description,
+    guess_type,
+    infer_json_sample,
+    parse_ddl,
+)
 from .writers import to_csv_string, to_sql_string, to_sqlite_bytes, write_sqlite
 
 __version__ = "0.1.0"
@@ -21,6 +28,11 @@ __all__ = [
     "register_field_type",
     "available_field_types",
     "field_type_groups",
+    "parse_ddl",
+    "from_csv_headers",
+    "infer_json_sample",
+    "from_description",
+    "guess_type",
     "to_csv_string",
     "to_sql_string",
     "write_sqlite",

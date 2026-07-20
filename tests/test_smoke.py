@@ -17,7 +17,12 @@ import pytest
 from testgen import (
     available_field_types,
     field_type_groups,
+    from_csv_headers,
+    from_description,
     generate,
+    guess_type,
+    infer_json_sample,
+    parse_ddl,
     register_field_type,
     to_csv_string,
     to_sql_string,
@@ -194,7 +199,7 @@ def test_every_grouped_type_generates():
             schema.append(field)
     rows = generate(schema, rows=3, seed=1)
     assert len(rows) == 3
-    assert all(rows[0][f["name"]] is not None for f in schema)
+    assert all(rows[0][field["name"]] is not None for field in schema)
 
 
 def test_field_type_groups_reference_real_types():
@@ -242,3 +247,82 @@ def test_null_pct_is_reproducible_and_partial():
     assert first == generate(spec, rows=100, seed=7)
     nulls = sum(1 for r in first if r["x"] is None)
     assert 0 < nulls < 100  # roughly half, but at least some of each
+
+
+# --- Fixtura P3: schema inference from DDL / CSV / JSON / description ---------
+
+
+def test_guess_type_basic_and_ordering():
+    assert guess_type("email") == "email"
+    assert guess_type("customer_email") == "email"
+    assert guess_type("is_active") == "bool"
+    assert guess_type("salary") == "price"
+    assert guess_type("created_at") == "datetime"
+    # zip contains "ip" but must stay a zip code, not become an IPv4
+    assert guess_type("zip") == "zip"
+    assert guess_type("id", "uuid") == "uuid"
+
+
+def test_parse_ddl_reads_columns_and_table():
+    ddl = """
+    CREATE TABLE users (
+      id UUID PRIMARY KEY,
+      first_name VARCHAR(50),
+      email VARCHAR(120),
+      salary DECIMAL(10,2),
+      is_active BOOLEAN,
+      created_at TIMESTAMP
+    );
+    """
+    table, fields = parse_ddl(ddl)
+    assert table == "users"
+    by_name = {field["name"]: field["type"] for field in fields}
+    assert by_name["first_name"] == "firstName"
+    assert by_name["email"] == "email"
+    assert by_name["salary"] == "price"
+    assert by_name["is_active"] == "bool"
+    assert by_name["created_at"] == "datetime"
+    # PRIMARY KEY line was skipped, so we only got the 6 real columns
+    assert len(fields) == 6
+    # and the inferred schema actually generates
+    assert len(generate(fields, rows=2, seed=1)) == 2
+
+
+def test_parse_ddl_without_columns_raises():
+    with pytest.raises(ValueError):
+        parse_ddl("CREATE TABLE oops")
+
+
+def test_from_csv_headers():
+    fields = from_csv_headers("order_id, customer_email, quantity\n1,a@b.com,5")
+    by_name = {field["name"]: field["type"] for field in fields}
+    assert by_name["order_id"] == "int"  # ends in _id, no uuid hint
+    assert by_name["customer_email"] == "email"
+    assert by_name["quantity"] == "int"
+
+
+def test_infer_json_sample_uses_names_and_values():
+    sample = '{"id": "abc", "age": 34, "balance": 12.5, "verified": true}'
+    fields = infer_json_sample(sample)
+    by_name = {field["name"]: field["type"] for field in fields}
+    assert by_name["age"] == "age"
+    assert by_name["verified"] == "bool"
+    assert by_name["balance"] == "price"
+
+
+def test_infer_json_invalid_raises():
+    with pytest.raises(ValueError):
+        infer_json_sample("{not valid json")
+
+
+def test_from_description_finds_fields_and_adds_id():
+    fields = from_description(
+        "A customer with full name, email, city, and lifetime spend."
+    )
+    names = {field["name"] for field in fields}
+    assert "id" in names  # always prepended
+    assert "email" in names
+    assert "full_name" in names
+    types = {field["type"] for field in fields}
+    assert "price" in types  # "spend" -> price
+    assert len(generate(fields, rows=2, seed=1)) == 2
