@@ -83,6 +83,13 @@ TYPE_OPTIONS = {
 }
 
 
+def type_label(name):
+    """How a type name appears in the dropdown. Types that have extra settings
+    get a gear marker so they stand out from the plain ones (name, email, ...)
+    that need no configuration. The stored value is still the plain name."""
+    return f"⚙️ {name}" if name in TYPE_OPTIONS else name
+
+
 def render_options(field, fid):
     """Draw the option inputs for this column's type and store the chosen values
     in field["options"]. A column whose type takes no options draws nothing.
@@ -124,21 +131,33 @@ def render_options(field, fid):
             key=option_key("round"),
         )
     elif field_type == "choice":
-        # The user types a comma-separated list; we split it into real choices.
-        # We keep the raw text too so the box shows exactly what they typed.
+        # "choice" picks one value per row from a list you provide. Explain that
+        # plainly, since a first-time user has no way to guess the format.
+        st.caption(
+            "Each row randomly gets **one** of these values. "
+            "Type your options separated by commas."
+        )
         raw = st.text_input(
-            "choices (comma-separated)",
+            "choices",
             value=opts.get("choices_raw", ""),
             key=option_key("choices"),
-            placeholder="Red, Green, Blue",
+            placeholder="Dept of Defense, GSA, NASA",
+            help="Example: Red, Green, Blue  ->  each row becomes one of those.",
         )
         opts["choices_raw"] = raw
         opts["choices"] = [c.strip() for c in raw.split(",") if c.strip()]
+
         wraw = st.text_input(
-            "weights (optional, one number per choice)",
+            "weights (optional)",
             value=opts.get("weights_raw", ""),
             key=option_key("weights"),
-            placeholder="e.g. 5, 3, 1",
+            placeholder="leave blank for equal chances",
+            help=(
+                "How often each choice shows up, one number per choice in the "
+                "same order. Higher means more common. Example: choices "
+                "'A, B' with weights '9, 1' makes A about 9x as likely. "
+                "Leave blank to make every choice equally likely."
+            ),
         )
         opts["weights_raw"] = wraw
         numbers = []
@@ -153,6 +172,16 @@ def render_options(field, fid):
         opts["weights"] = (
             numbers if numbers and len(numbers) == len(opts["choices"]) else None
         )
+
+        # Live feedback so the user can see the tool understood their input.
+        if opts["choices"]:
+            summary = ", ".join(opts["choices"])
+            if opts["weights"]:
+                st.caption(f"✅ Picks from (weighted): {summary}")
+            else:
+                st.caption(f"✅ Picks evenly from: {summary}")
+        else:
+            st.caption("⚠️ Add at least one choice above.")
     elif field_type == "date":
         c1, c2 = st.columns(2)
         start = c1.date_input(
@@ -169,11 +198,31 @@ def render_options(field, fid):
         opts["start"] = start.isoformat()
         opts["end"] = end.isoformat()
     elif field_type == "pattern":
+        # "pattern" builds made-up codes from a template. Spell out the two
+        # special characters, since they are not obvious.
+        st.caption(
+            "A template for made-up ID codes. **#** becomes a random digit "
+            "(0-9), **?** becomes a random letter (A-Z). Any other characters "
+            "(dashes, letters) stay exactly as you type them."
+        )
         opts["pattern"] = st.text_input(
-            "pattern  (# = digit, ? = letter)",
+            "pattern",
             value=opts.get("pattern", "CAGE-#####"),
             key=option_key("pattern"),
+            help="Examples: CAGE-#####  ->  CAGE-73920      ??-####  ->  QX-4821",
         )
+        # Show a real example produced by the engine itself, so what they see is
+        # exactly what they will get. A fixed seed keeps the example steady.
+        if opts["pattern"]:
+            try:
+                sample = generate(
+                    [{"name": "x", "type": "pattern", "pattern": opts["pattern"]}],
+                    rows=1,
+                    seed=0,
+                )[0]["x"]
+                st.caption(f"✅ Example output: `{sample}`")
+            except Exception:
+                st.caption("⚠️ Enter a pattern above.")
     elif field_type == "constant":
         opts["value"] = st.text_input(
             "value (same on every row)",
@@ -250,6 +299,7 @@ for field in list(st.session_state["schema"]):
             "Type",
             options=types,
             index=types.index(field["type"]),
+            format_func=type_label,
             key=f"type_{fid}",
             label_visibility="collapsed",
         )
