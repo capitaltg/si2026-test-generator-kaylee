@@ -14,6 +14,7 @@ all share the same signature so the engine can call any of them the same way:
 To add a new field type later, write a function with this signature and add it
 to the FIELD_TYPES dict at the bottom. Nothing else needs to change.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -166,9 +167,7 @@ def _pattern(field, index, rng, faker):
     letter. Perfect for custom id formats, e.g. 'CAGE-#####', 'DUNS-#########',
     or '??-####'. Seeded via faker, so reproducible.
     """
-    return faker.bothify(
-        text=field["pattern"], letters="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    )
+    return faker.bothify(text=field["pattern"], letters="ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
 
 def _as_date(value):
