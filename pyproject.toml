@@ -14,11 +14,12 @@ requires-python = ">=3.9"
 dependencies = ["Faker"]
 
 # Optional extras. These are NOT installed by a plain `pip install .`; you opt
-# in by name. The `ui` group holds everything the web front door needs, so the
-# core engine stays lightweight for people who only want the library or CLI.
-#   pip install ".[ui]"   installs testgen + Streamlit for the website.
+# in by name. The `web` group holds everything the Fixtura web front door needs
+# (a FastAPI server), so the core engine stays lightweight for people who only
+# want the library or CLI.
+#   pip install ".[web]"   installs testgen + FastAPI + a server to run Fixtura.
 [project.optional-dependencies]
-ui = ["streamlit"]
+web = ["fastapi", "uvicorn[standard]", "httpx"]
 
 # This line is what turns `testgen` into a real terminal command after
 # `pip install .`. It says: when someone runs `testgen`, call the main()

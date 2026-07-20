@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from .core import generate
 from .fields import available_field_types, field_type_groups, register_field_type
-from .writers import to_csv_string, to_sql_string, write_sqlite
+from .writers import to_csv_string, to_sql_string, to_sqlite_bytes, write_sqlite
 
 __version__ = "0.1.0"
 __all__ = [
@@ -24,5 +24,6 @@ __all__ = [
     "to_csv_string",
     "to_sql_string",
     "write_sqlite",
+    "to_sqlite_bytes",
     "__version__",
 ]

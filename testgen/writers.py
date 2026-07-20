@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import sqlite3
+import tempfile
 
 
 def to_csv_string(rows):
@@ -100,6 +102,25 @@ def write_sqlite(rows, path, table="records"):
         connection.commit()
     finally:
         connection.close()
+
+
+def to_sqlite_bytes(rows, table="records"):
+    """Return a SQLite database as raw bytes, for handing over as a download.
+
+    write_sqlite() writes to a file path, but a web download (or any in-memory
+    caller) needs the file's *contents*. So we write to a throwaway temp file,
+    read its bytes back, and delete it. Keeps the temp-file dance in one place
+    instead of every front door reinventing it.
+    """
+    handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    path = handle.name
+    handle.close()
+    try:
+        write_sqlite(rows, path, table=table)
+        with open(path, "rb") as f:
+            return f.read()
+    finally:
+        os.remove(path)
 
 
 def _sql_type(value):
