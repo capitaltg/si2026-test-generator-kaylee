@@ -16,6 +16,7 @@ import pytest
 
 from testgen import (
     available_field_types,
+    field_type_groups,
     generate,
     register_field_type,
     to_csv_string,
@@ -23,6 +24,7 @@ from testgen import (
     write_sqlite,
 )
 from testgen.cli import main
+from testgen.fields import FIELD_TYPES
 
 # A small schema exercising several field types, reused across tests.
 SCHEMA = [
@@ -171,3 +173,72 @@ def test_cli_sqlite_without_out_is_an_error():
     # argparse's parser.error() exits with SystemExit, not a normal return.
     with pytest.raises(SystemExit):
         main(["--format", "sqlite"])
+
+
+# --- Fixtura P1: expanded types, grouped metadata, null % --------------------
+
+
+def test_every_grouped_type_generates():
+    """Build a schema with one column of every type in the grouped menu and
+    make sure they all produce a value (the two that need options get them)."""
+    schema = []
+    for _group, items in field_type_groups():
+        for type_name, _label in items:
+            field = {"name": type_name, "type": type_name}
+            if type_name == "enum":
+                field["values"] = "a, b, c"
+            if type_name == "constant":
+                field["value"] = "X"
+            if type_name == "pattern":
+                field["pattern"] = "AB-####"
+            schema.append(field)
+    rows = generate(schema, rows=3, seed=1)
+    assert len(rows) == 3
+    assert all(rows[0][f["name"]] is not None for f in schema)
+
+
+def test_field_type_groups_reference_real_types():
+    for _group, items in field_type_groups():
+        for type_name, _label in items:
+            assert type_name in FIELD_TYPES, f"{type_name} not registered"
+
+
+def test_fixtura_aliases_map_to_the_right_generator():
+    rows = generate(
+        [
+            {"name": "a", "type": "autoIncrement", "prefix": "N-", "start": 1},
+            {"name": "b", "type": "price", "min": 10, "max": 20},
+        ],
+        rows=3,
+        seed=1,
+    )
+    assert rows[0]["a"] == "N-1"
+    assert rows[1]["a"] == "N-2"
+    assert all(10 <= r["b"] <= 20 for r in rows)
+
+
+def test_enum_accepts_a_comma_separated_values_string():
+    rows = generate(
+        [{"name": "s", "type": "enum", "values": "active, pending, closed"}],
+        rows=30,
+        seed=1,
+    )
+    assert all(r["s"] in {"active", "pending", "closed"} for r in rows)
+
+
+def test_null_pct_100_is_all_null():
+    rows = generate([{"name": "x", "type": "int", "null_pct": 100}], rows=20, seed=1)
+    assert all(r["x"] is None for r in rows)
+
+
+def test_null_pct_0_is_never_null():
+    rows = generate([{"name": "x", "type": "int", "null_pct": 0}], rows=20, seed=1)
+    assert all(r["x"] is not None for r in rows)
+
+
+def test_null_pct_is_reproducible_and_partial():
+    spec = [{"name": "x", "type": "int", "null_pct": 50}]
+    first = generate(spec, rows=100, seed=7)
+    assert first == generate(spec, rows=100, seed=7)
+    nulls = sum(1 for r in first if r["x"] is None)
+    assert 0 < nulls < 100  # roughly half, but at least some of each

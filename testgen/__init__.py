@@ -12,7 +12,7 @@ to the same engine.
 from __future__ import annotations
 
 from .core import generate
-from .fields import available_field_types, register_field_type
+from .fields import available_field_types, field_type_groups, register_field_type
 from .writers import to_csv_string, to_sql_string, write_sqlite
 
 __version__ = "0.1.0"
@@ -20,6 +20,7 @@ __all__ = [
     "generate",
     "register_field_type",
     "available_field_types",
+    "field_type_groups",
     "to_csv_string",
     "to_sql_string",
     "write_sqlite",
