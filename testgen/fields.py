@@ -56,12 +56,21 @@ def _float(field, index, rng, faker):
 
 
 def _choice(field, index, rng, faker):
-    """Pick one from a list. Options: choices (required), weights (optional).
+    """Pick one from a list. Options: choices or values (one required),
+    weights (optional).
 
+    choices is a real list ["A", "B"]. values is the same thing as a single
+    comma-separated string "A, B" (this is how Fixtura's "enum" type sends it).
     weights lets some options show up more often than others, e.g.
     choices=["A", "B"], weights=[9, 1] makes "A" roughly 9x as common.
     """
-    choices = field["choices"]
+    choices = field.get("choices")
+    if not choices and field.get("values") is not None:
+        choices = [c.strip() for c in str(field["values"]).split(",") if c.strip()]
+    if not choices:
+        raise ValueError(
+            "choice/enum needs 'choices' (a list) or 'values' (a comma string)."
+        )
     weights = field.get("weights")
     if weights:
         return rng.choices(choices, weights=weights, k=1)[0]
@@ -177,6 +186,93 @@ def _as_date(value):
     return datetime.date.fromisoformat(value)
 
 
+# --- Fixtura parity: extra generators to match the designed type menu --------
+# Each still follows the standard fn(field, index, rng, faker) signature. Where
+# Faker offers a good realistic value we use it (all seeded, so reproducible);
+# for a few we roll our own with the seeded rng.
+
+_PRODUCTS = [
+    "Standard License",
+    "Pro Subscription",
+    "Data Pack",
+    "Support Plan",
+    "Analytics Add-on",
+    "Enterprise Seat",
+    "API Credits",
+    "Storage Tier",
+    "Onboarding Kit",
+    "Security Module",
+]
+_GENDERS = ["Female", "Male", "Non-binary"]
+
+
+def _full_name(field, index, rng, faker):
+    return faker.name()
+
+
+def _gender(field, index, rng, faker):
+    return rng.choice(_GENDERS)
+
+
+def _age(field, index, rng, faker):
+    """Whole number age. Options: min (default 18), max (default 80)."""
+    return rng.randint(field.get("min", 18), field.get("max", 80))
+
+
+def _username(field, index, rng, faker):
+    return faker.user_name()
+
+
+def _latitude(field, index, rng, faker):
+    return float(faker.latitude())
+
+
+def _longitude(field, index, rng, faker):
+    return float(faker.longitude())
+
+
+def _domain(field, index, rng, faker):
+    return faker.domain_name()
+
+
+def _ipv4(field, index, rng, faker):
+    return faker.ipv4()
+
+
+def _mac_address(field, index, rng, faker):
+    return faker.mac_address()
+
+
+def _color(field, index, rng, faker):
+    """A hex color like #3fa9c2. Built from the seeded rng so it is reproducible
+    regardless of the installed Faker version."""
+    return f"#{rng.randint(0, 0xFFFFFF):06x}"
+
+
+def _product(field, index, rng, faker):
+    return rng.choice(_PRODUCTS)
+
+
+def _currency(field, index, rng, faker):
+    return faker.currency_code()
+
+
+def _credit_card(field, index, rng, faker):
+    return faker.credit_card_number()
+
+
+def _datetime(field, index, rng, faker):
+    """A datetime between start and end. Options: start, end ('YYYY-MM-DD')."""
+    start = _as_date(field.get("start", "2000-01-01"))
+    end = _as_date(field.get("end", "2025-12-31"))
+    return faker.date_time_between(start_date=start, end_date=end)
+
+
+def _time(field, index, rng, faker):
+    """A clock time like 14:37:05."""
+    return faker.time()
+
+
 # The registry: type name -> the function that generates it. This is the whole
 # menu of field types the tool currently understands, grouped for readability.
 FIELD_TYPES = {
@@ -214,6 +310,35 @@ FIELD_TYPES = {
     "uuid": _uuid,
     "pattern": _pattern,
     "constant": _constant,
+    # --- Fixtura parity: new generators ---
+    "full_name": _full_name,
+    "gender": _gender,
+    "age": _age,
+    "username": _username,
+    "latitude": _latitude,
+    "longitude": _longitude,
+    "domain": _domain,
+    "ipv4": _ipv4,
+    "mac_address": _mac_address,
+    "color": _color,
+    "product": _product,
+    "currency": _currency,
+    "credit_card": _credit_card,
+    "datetime": _datetime,
+    "time": _time,
+    # --- Fixtura aliases: the camelCase names the designed dropdown sends,
+    # pointed at the same generator as our snake_case names so both work. ---
+    "firstName": _first_name,
+    "lastName": _last_name,
+    "fullName": _full_name,
+    "jobTitle": _job,
+    "streetAddress": _street_address,
+    "zip": _zipcode,
+    "macAddress": _mac_address,
+    "creditCard": _credit_card,
+    "autoIncrement": _sequence,
+    "price": _money,
+    "enum": _choice,
 }
 
 
@@ -242,3 +367,81 @@ def register_field_type(name, fn):
 def available_field_types():
     """Return the sorted list of field type names the tool currently knows."""
     return sorted(FIELD_TYPES)
+
+
+# Presentation metadata: how the type menu is grouped and labelled in the UI.
+# Living here (not in the UI) keeps it the single source of truth, so every
+# front door shows the same organized dropdown. Each type name below is a real
+# key in FIELD_TYPES. This mirrors Fixtura's grouped dropdown.
+FIELD_TYPE_GROUPS = [
+    ("Identity", [("uuid", "UUID"), ("autoIncrement", "Auto-increment")]),
+    (
+        "Personal",
+        [
+            ("firstName", "First name"),
+            ("lastName", "Last name"),
+            ("fullName", "Full name"),
+            ("gender", "Gender"),
+            ("age", "Age"),
+            ("jobTitle", "Job title"),
+            ("company", "Company"),
+        ],
+    ),
+    (
+        "Contact",
+        [
+            ("email", "Email"),
+            ("phone", "Phone"),
+            ("username", "Username"),
+        ],
+    ),
+    (
+        "Location",
+        [
+            ("streetAddress", "Street address"),
+            ("city", "City"),
+            ("state", "State"),
+            ("zip", "Zip code"),
+            ("country", "Country"),
+            ("latitude", "Latitude"),
+            ("longitude", "Longitude"),
+        ],
+    ),
+    (
+        "Internet",
+        [
+            ("url", "URL"),
+            ("domain", "Domain"),
+            ("ipv4", "IPv4"),
+            ("macAddress", "MAC address"),
+            ("color", "Hex color"),
+        ],
+    ),
+    (
+        "Commerce",
+        [
+            ("price", "Price"),
+            ("product", "Product"),
+            ("currency", "Currency"),
+            ("creditCard", "Credit card"),
+        ],
+    ),
+    ("Numbers", [("int", "Integer"), ("float", "Float"), ("bool", "Boolean")]),
+    ("Dates", [("date", "Date"), ("datetime", "Datetime"), ("time", "Time")]),
+    (
+        "Text",
+        [
+            ("word", "Word"),
+            ("sentence", "Sentence"),
+            ("paragraph", "Paragraph"),
+            ("enum", "Enum (custom)"),
+            ("constant", "Constant"),
+        ],
+    ),
+]
+
+
+def field_type_groups():
+    """Return the grouped, labelled type menu for building a dropdown:
+    a list of (group_name, [(type_name, label), ...])."""
+    return FIELD_TYPE_GROUPS

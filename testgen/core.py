@@ -60,8 +60,16 @@ def generate(schema, *, rows=10, seed=None):
     for index in range(rows):
         row = {}
         for field in schema:
-            make_value = FIELD_TYPES[field["type"]]
-            row[field["name"]] = make_value(field, index, rng, faker)
+            # Optional per-field nullability: a field may set "null_pct" (0-100),
+            # the percent of rows that come out NULL. We only draw a random when
+            # null_pct is set, so fields without it consume no randomness and
+            # their output stays byte-identical to before this feature existed.
+            null_pct = field.get("null_pct", 0)
+            if null_pct and rng.random() * 100 < null_pct:
+                row[field["name"]] = None
+            else:
+                make_value = FIELD_TYPES[field["type"]]
+                row[field["name"]] = make_value(field, index, rng, faker)
         result.append(row)
     return result
 
