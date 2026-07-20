@@ -27,16 +27,34 @@ const $ = (sel) => document.querySelector(sel);
 
 // Accent colour themes: name -> [--accent, --accent-dark]. The whole palette is
 // driven by these two CSS variables, so swapping them re-colours everything.
+// name -> [accent, accent-dark, header]. The header bar recolours with the
+// theme too, so switching themes changes the whole chrome, not just the accent.
 const ACCENTS = {
-  "Federal Blue": ["#005ea2", "#1a4480"],
-  Slate: ["#40536b", "#26344a"],
-  Teal: ["#0f7b8a", "#0b5966"],
-  Ink: ["#2c2c2c", "#000000"],
+  "Federal Blue": ["#005ea2", "#1a4480", "#162e51"],
+  Slate: ["#40536b", "#26344a", "#1c2735"],
+  Teal: ["#0f7b8a", "#0b5966", "#08414b"],
+  Ink: ["#2c2c2c", "#000000", "#111111"],
 };
 
-function applyAccent(a1, a2) {
-  document.documentElement.style.setProperty("--accent", a1);
-  document.documentElement.style.setProperty("--accent-dark", a2);
+function applyAccent(accent, accentDark, header) {
+  const root = document.documentElement.style;
+  root.setProperty("--accent", accent);
+  root.setProperty("--accent-dark", accentDark);
+  root.setProperty("--header-bg", header || accentDark);
+}
+
+// Darken a #rrggbb colour by a factor (0..1). Lets us derive a matching darker
+// accent and header shade from any custom colour the user picks.
+function darken(hex, factor) {
+  const num = parseInt(hex.slice(1), 16);
+  const r = Math.round(((num >> 16) & 255) * factor);
+  const g = Math.round(((num >> 8) & 255) * factor);
+  const b = Math.round((num & 255) * factor);
+  return "#" + [r, g, b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+function applyCustom(hex) {
+  applyAccent(hex, darken(hex, 0.7), darken(hex, 0.45));
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -367,13 +385,12 @@ function wireEvents() {
     const name = e.target.value;
     $("#customColor").style.display = name === "Custom" ? "" : "none";
     if (name === "Custom") {
-      const c = $("#customColor").value;
-      applyAccent(c, c);
+      applyCustom($("#customColor").value);
     } else {
       applyAccent(...ACCENTS[name]);
     }
   });
-  $("#customColor").addEventListener("input", (e) => applyAccent(e.target.value, e.target.value));
+  $("#customColor").addEventListener("input", (e) => applyCustom(e.target.value));
 
   // Row-count preset buttons + output tabs (both in the output bar).
   $("#rowsCtrl").addEventListener("click", (e) => {
