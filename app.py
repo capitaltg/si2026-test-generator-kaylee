@@ -137,6 +137,12 @@ seed = st.number_input("Seed", value=42, disabled=not use_seed) if use_seed else
 
 # --- Generate ----------------------------------------------------------------
 
+# These types need an extra option to work (choice -> a choices list, pattern ->
+# a template, constant -> a value). The UI cannot set those until the next
+# ticket (#12), so we catch them up front with a clear message rather than let
+# the engine raise a cryptic KeyError like 'value'.
+NEEDS_OPTIONS = {"choice", "pattern", "constant"}
+
 if st.button("Generate data", type="primary"):
     # Build the schema the engine expects: just name + type per column. We drop
     # our internal "id" (the engine does not need it). Per-type options like
@@ -144,14 +150,21 @@ if st.button("Generate data", type="primary"):
     schema = [
         {"name": f["name"], "type": f["type"]} for f in st.session_state["schema"]
     ]
-    try:
-        st.session_state["rows"] = generate(schema, rows=int(rows), seed=seed)
-    except Exception as error:
-        # Two common cases land here for now: an empty schema, and the types that
-        # still need options we cannot set until #12 (choice, pattern, constant).
-        # Show the message instead of crashing the page.
+    waiting = sorted({f["type"] for f in schema if f["type"] in NEEDS_OPTIONS})
+    if waiting:
         st.session_state.pop("rows", None)
-        st.error(f"Could not generate: {error}")
+        st.warning(
+            "These types need extra options that the UI cannot set yet: "
+            f"**{', '.join(waiting)}**. They arrive in the next update (#12). "
+            "For now, pick a different type for those columns."
+        )
+    else:
+        try:
+            st.session_state["rows"] = generate(schema, rows=int(rows), seed=seed)
+        except Exception as error:
+            # Mainly the empty-schema case lands here now. Show it, don't crash.
+            st.session_state.pop("rows", None)
+            st.error(f"Could not generate: {error}")
 
 
 # --- Preview + downloads -----------------------------------------------------
