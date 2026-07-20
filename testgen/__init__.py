@@ -11,6 +11,12 @@ to the same engine.
 from __future__ import annotations
 
 from .core import generate
+from .fields import available_field_types, register_field_type
 
 __version__ = "0.1.0"
-__all__ = ["generate", "__version__"]
+__all__ = [
+    "generate",
+    "register_field_type",
+    "available_field_types",
+    "__version__",
+]
