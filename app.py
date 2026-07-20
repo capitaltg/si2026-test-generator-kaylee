@@ -1,8 +1,8 @@
-"""The web front door: a small Streamlit app for generating test data.
+"""The web front door: a Streamlit app for generating test data.
 
 This is the THIRD way to reach the engine, alongside the Python library and the
-CLI. It does not reimplement anything. It imports the exact same generate() and
-writer functions the CLI uses and simply wraps them in a browser page.
+CLI. It reimplements nothing: it imports the same generate() and writer
+functions the CLI uses and wraps them in a browser page.
 
 How to run it (from the repo root):
 
@@ -12,9 +12,9 @@ How to run it (from the repo root):
 IMPORTANT mental model: Streamlit reruns this whole file top to bottom every
 time you interact with the page (click, type, etc.). So the code below is not
 "set up once and wait for events"; it is "describe what the page looks like
-right now," re-executed on every interaction. We use st.session_state (a dict
-that survives across those reruns) to remember the generated rows so the preview
-and the download buttons always show the same data.
+right now," re-executed on every interaction. Anything that must survive across
+those reruns (the schema you are building, the rows you generated) lives in
+st.session_state, a dict that persists between reruns.
 """
 
 from __future__ import annotations
@@ -24,11 +24,16 @@ import tempfile
 
 import streamlit as st
 
-# We reuse the engine and writers exactly as the CLI does. EXAMPLE_SCHEMA is the
-# same demo schema the CLI prints; in the next ticket we replace it with an
-# interactive builder, but for this scaffold it gives us real data to show.
-from testgen import generate, to_csv_string, to_sql_string, write_sqlite
-from testgen.cli import EXAMPLE_SCHEMA
+# We reuse the engine and writers exactly as the CLI does. available_field_types
+# gives us the live list of types to offer in the type dropdown, so the UI never
+# drifts out of sync with what the engine actually supports.
+from testgen import (
+    available_field_types,
+    generate,
+    to_csv_string,
+    to_sql_string,
+    write_sqlite,
+)
 
 
 def sqlite_bytes(rows, table="records"):
@@ -36,10 +41,8 @@ def sqlite_bytes(rows, table="records"):
 
     write_sqlite() writes to a file path, but a download button needs the file's
     *contents* in memory. So we write to a throwaway temporary file, read its
-    bytes back, and delete it. The user never sees this temp file; it exists just
-    long enough to capture the bytes.
+    bytes back, and delete it. The user never sees this temp file.
     """
-    # Make a temp path, then close it immediately so sqlite can open it itself.
     handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     path = handle.name
     handle.close()
@@ -51,56 +54,121 @@ def sqlite_bytes(rows, table="records"):
         os.remove(path)
 
 
-# --- The page itself ---------------------------------------------------------
+def new_field():
+    """Create one blank column for the schema, with a stable unique id.
 
-# st.set_page_config just sets the browser tab title and layout. Must be the
-# first Streamlit call on the page.
+    The id is what lets us add and remove columns safely. We key each row's
+    widgets off this id (not its position in the list), so deleting the middle
+    column never makes the other rows' values jump around.
+    """
+    fid = st.session_state["next_id"]
+    st.session_state["next_id"] += 1
+    return {"id": fid, "name": f"column_{fid + 1}", "type": "name"}
+
+
+# --- One-time setup of the builder's state -----------------------------------
+
+# This block runs only on the very first load (when "schema" is not in state
+# yet). It seeds the page with a couple of example columns so it is not empty.
+# On later reruns "schema" already exists, so we leave it alone.
+if "schema" not in st.session_state:
+    st.session_state["next_id"] = 0
+    st.session_state["schema"] = [
+        {"id": 0, "name": "vendor", "type": "company"},
+        {"id": 1, "name": "amount", "type": "int"},
+    ]
+    st.session_state["next_id"] = 2  # the next new column will be id 2
+
+
+# --- The page ----------------------------------------------------------------
+
 st.set_page_config(page_title="testgen", page_icon="🧪")
-
 st.title("🧪 testgen")
-st.write(
-    "Generate realistic, reproducible fake test data, then download it as CSV, "
-    "SQL, or a SQLite database."
-)
+st.write("Design a table, then generate realistic, reproducible fake data for it.")
 
-# These two widgets draw controls AND return their current values in one step.
-# number_input draws a number box; whatever the user has typed comes back here.
+st.subheader("Columns")
+
+types = available_field_types()  # the dropdown options, straight from the engine
+
+# Draw one row of controls per column. We loop over a *copy* of the list
+# (list(...)) because a Remove click edits the real list mid-loop; iterating the
+# copy avoids "changed size during iteration" surprises.
+for field in list(st.session_state["schema"]):
+    fid = field["id"]
+    # Three columns of the layout: name box (wide), type dropdown (wide), and a
+    # small remove button. The numbers are relative widths.
+    name_col, type_col, remove_col = st.columns([4, 4, 1])
+
+    # value= sets the starting text; key= gives this widget a stable identity so
+    # Streamlit remembers it across reruns. Assigning back into field["name"]
+    # updates the dict living in session_state (field is a reference to it).
+    field["name"] = name_col.text_input(
+        "Name", value=field["name"], key=f"name_{fid}", label_visibility="collapsed"
+    )
+    field["type"] = type_col.selectbox(
+        "Type",
+        options=types,
+        index=types.index(field["type"]),
+        key=f"type_{fid}",
+        label_visibility="collapsed",
+    )
+    # A remove button returns True only on the rerun where it was clicked. We
+    # rebuild the list without this id, then st.rerun() re-executes the script
+    # immediately so the row disappears right away.
+    if remove_col.button("✕", key=f"rm_{fid}", help="Remove this column"):
+        st.session_state["schema"] = [
+            f for f in st.session_state["schema"] if f["id"] != fid
+        ]
+        st.rerun()
+
+# The add button sits below the rows. On click we append a fresh column and
+# rerun so it shows up immediately.
+if st.button("➕ Add column"):
+    st.session_state["schema"].append(new_field())
+    st.rerun()
+
+
+st.subheader("Settings")
+
 rows = st.number_input("How many rows", min_value=1, max_value=10000, value=10)
-
-# Seed is optional. A checkbox decides whether we pass a seed at all. With a
-# seed, the same settings always produce the same data (reproducible). Without
-# one, every generation is fresh and different.
 use_seed = st.checkbox("Use a fixed seed (reproducible output)", value=True)
 seed = st.number_input("Seed", value=42, disabled=not use_seed) if use_seed else None
 
-# A button returns True only on the rerun where it was just clicked. So this
-# block runs once, right after the click: we generate the data and stash it in
-# session_state so it survives later reruns (like clicking a download button).
-if st.button("Generate data", type="primary"):
-    st.session_state["rows"] = generate(EXAMPLE_SCHEMA, rows=int(rows), seed=seed)
 
-# On every rerun, if we have generated rows stored, draw the preview and the
-# download buttons. This lives OUTSIDE the button block on purpose: after you
-# click a download button the script reruns, the button above is no longer
-# "just clicked" (so it's False), but the stored rows are still here.
+# --- Generate ----------------------------------------------------------------
+
+if st.button("Generate data", type="primary"):
+    # Build the schema the engine expects: just name + type per column. We drop
+    # our internal "id" (the engine does not need it). Per-type options like
+    # min/max arrive in the next ticket.
+    schema = [
+        {"name": f["name"], "type": f["type"]} for f in st.session_state["schema"]
+    ]
+    try:
+        st.session_state["rows"] = generate(schema, rows=int(rows), seed=seed)
+    except Exception as error:
+        # Two common cases land here for now: an empty schema, and the types that
+        # still need options we cannot set until #12 (choice, pattern, constant).
+        # Show the message instead of crashing the page.
+        st.session_state.pop("rows", None)
+        st.error(f"Could not generate: {error}")
+
+
+# --- Preview + downloads -----------------------------------------------------
+
+# Lives outside the button block so it stays on screen across reruns (e.g. after
+# clicking a download button, which triggers its own rerun).
 if "rows" in st.session_state:
     data = st.session_state["rows"]
 
     st.subheader(f"Preview ({len(data)} rows)")
-    # st.dataframe renders a list of dicts as an interactive, scrollable grid.
-    st.dataframe(data, use_container_width=True)
+    st.dataframe(data, width="stretch")
 
     st.subheader("Download")
-    # Each download_button needs its file contents ready at draw time (there is
-    # no "generate on click" callback), so we build all three formats up front
-    # from the same stored rows. Three columns just lay the buttons out in a row.
     col1, col2, col3 = st.columns(3)
     with col1:
         st.download_button(
-            "CSV",
-            data=to_csv_string(data),
-            file_name="testgen.csv",
-            mime="text/csv",
+            "CSV", data=to_csv_string(data), file_name="testgen.csv", mime="text/csv"
         )
     with col2:
         st.download_button(
@@ -116,6 +184,3 @@ if "rows" in st.session_state:
             file_name="testgen.db",
             mime="application/x-sqlite3",
         )
-else:
-    # Shown before the first generation, so the page is not just an empty form.
-    st.info("Set your options above and click **Generate data** to begin.")
