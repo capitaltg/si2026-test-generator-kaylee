@@ -3,14 +3,25 @@
 These cover the two things that matter most for Ticket 2: the engine produces
 the right shape of data, and it is reproducible (same seed -> same output).
 """
+
 from __future__ import annotations
 
+import csv
 import datetime
+import io
 import re
+import sqlite3
 
 import pytest
 
-from testgen import available_field_types, generate, register_field_type
+from testgen import (
+    available_field_types,
+    generate,
+    register_field_type,
+    to_csv_string,
+    to_sql_string,
+    write_sqlite,
+)
 from testgen.cli import main
 
 # A small schema exercising several field types, reused across tests.
@@ -92,3 +103,71 @@ def test_cli_door_still_runs():
 
 def test_cli_list_types_runs():
     assert main(["--list-types"]) == 0
+
+
+# --- Ticket 3: output writers -------------------------------------------------
+
+
+def test_csv_has_header_and_one_line_per_row():
+    rows = generate(SCHEMA, rows=3, seed=1)
+    text = to_csv_string(rows)
+    parsed = list(csv.DictReader(io.StringIO(text)))
+    assert len(parsed) == 3
+    assert set(parsed[0]) == {"id", "vendor", "amount", "awarded_on"}
+    # Values survive the round trip (csv is all strings, so compare as strings).
+    assert parsed[0]["id"] == "A-1"
+
+
+def test_csv_of_empty_rows_is_empty_string():
+    assert to_csv_string([]) == ""
+
+
+def test_sql_dump_has_create_and_one_insert_per_row():
+    rows = generate(SCHEMA, rows=3, seed=1)
+    text = to_sql_string(rows, table="awards")
+    assert text.count("CREATE TABLE awards") == 1
+    assert text.count("INSERT INTO awards") == 3
+
+
+def test_sql_dump_escapes_single_quotes():
+    rows = [{"note": "O'Brien & Co"}]
+    text = to_sql_string(rows, table="t")
+    # The single quote must be doubled so the SQL literal stays valid.
+    assert "'O''Brien & Co'" in text
+
+
+def test_sqlite_file_is_queryable(tmp_path):
+    rows = generate(SCHEMA, rows=5, seed=1)
+    db_path = tmp_path / "out.db"
+    write_sqlite(rows, str(db_path), table="awards")
+
+    connection = sqlite3.connect(str(db_path))
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM awards").fetchone()[0]
+    finally:
+        connection.close()
+    assert count == 5
+
+
+def test_cli_writes_csv_file(tmp_path):
+    out = tmp_path / "data.csv"
+    assert (
+        main(["--rows", "4", "--seed", "1", "--format", "csv", "--out", str(out)]) == 0
+    )
+    parsed = list(csv.DictReader(out.open()))
+    assert len(parsed) == 4
+
+
+def test_cli_writes_sqlite_file(tmp_path):
+    out = tmp_path / "data.db"
+    assert (
+        main(["--rows", "4", "--seed", "1", "--format", "sqlite", "--out", str(out)])
+        == 0
+    )
+    assert out.exists()
+
+
+def test_cli_sqlite_without_out_is_an_error():
+    # argparse's parser.error() exits with SystemExit, not a normal return.
+    with pytest.raises(SystemExit):
+        main(["--format", "sqlite"])

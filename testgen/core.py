@@ -5,6 +5,7 @@ case. It takes a *description* of the data you want (a schema) and produces it.
 Presets and document templates (added in later tickets) sit on top of this
 generic core, so the engine stays reusable for any dataset or database.
 """
+
 from __future__ import annotations
 
 import random
