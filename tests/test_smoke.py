@@ -199,7 +199,7 @@ def test_every_grouped_type_generates():
             schema.append(field)
     rows = generate(schema, rows=3, seed=1)
     assert len(rows) == 3
-    assert all(rows[0][f["name"]] is not None for f in schema)
+    assert all(rows[0][field["name"]] is not None for field in schema)
 
 
 def test_field_type_groups_reference_real_types():
@@ -276,7 +276,7 @@ def test_parse_ddl_reads_columns_and_table():
     """
     table, fields = parse_ddl(ddl)
     assert table == "users"
-    by_name = {f["name"]: f["type"] for f in fields}
+    by_name = {field["name"]: field["type"] for field in fields}
     assert by_name["first_name"] == "firstName"
     assert by_name["email"] == "email"
     assert by_name["salary"] == "price"
@@ -295,7 +295,7 @@ def test_parse_ddl_without_columns_raises():
 
 def test_from_csv_headers():
     fields = from_csv_headers("order_id, customer_email, quantity\n1,a@b.com,5")
-    by_name = {f["name"]: f["type"] for f in fields}
+    by_name = {field["name"]: field["type"] for field in fields}
     assert by_name["order_id"] == "int"  # ends in _id, no uuid hint
     assert by_name["customer_email"] == "email"
     assert by_name["quantity"] == "int"
@@ -304,7 +304,7 @@ def test_from_csv_headers():
 def test_infer_json_sample_uses_names_and_values():
     sample = '{"id": "abc", "age": 34, "balance": 12.5, "verified": true}'
     fields = infer_json_sample(sample)
-    by_name = {f["name"]: f["type"] for f in fields}
+    by_name = {field["name"]: field["type"] for field in fields}
     assert by_name["age"] == "age"
     assert by_name["verified"] == "bool"
     assert by_name["balance"] == "price"
@@ -319,10 +319,10 @@ def test_from_description_finds_fields_and_adds_id():
     fields = from_description(
         "A customer with full name, email, city, and lifetime spend."
     )
-    names = {f["name"] for f in fields}
+    names = {field["name"] for field in fields}
     assert "id" in names  # always prepended
     assert "email" in names
     assert "full_name" in names
-    types = {f["type"] for f in fields}
+    types = {field["type"] for field in fields}
     assert "price" in types  # "spend" -> price
     assert len(generate(fields, rows=2, seed=1)) == 2

@@ -92,7 +92,9 @@ def test_schema_from_ddl_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert data["table"] == "t"
-    assert {f["name"]: f["type"] for f in data["fields"]}["email"] == "email"
+    assert {field["name"]: field["type"] for field in data["fields"]}[
+        "email"
+    ] == "email"
 
 
 def test_schema_from_ddl_bad_input_is_400():
@@ -103,7 +105,7 @@ def test_schema_from_ddl_bad_input_is_400():
 def test_schema_from_csv_endpoint():
     resp = client.post("/schema/from-csv", json={"csv": "name,email,age"})
     assert resp.status_code == 200
-    names = [f["name"] for f in resp.json()["fields"]]
+    names = [field["name"] for field in resp.json()["fields"]]
     assert names == ["name", "email", "age"]
 
 
@@ -112,7 +114,9 @@ def test_schema_from_json_endpoint():
         "/schema/from-json", json={"sample": '{"id":"x","verified":true}'}
     )
     assert resp.status_code == 200
-    assert {f["name"]: f["type"] for f in resp.json()["fields"]}["verified"] == "bool"
+    assert {field["name"]: field["type"] for field in resp.json()["fields"]}[
+        "verified"
+    ] == "bool"
 
 
 def test_schema_from_json_invalid_is_400():
@@ -125,5 +129,5 @@ def test_schema_from_description_endpoint():
         "/schema/from-description", json={"text": "name, email, and city"}
     )
     assert resp.status_code == 200
-    names = {f["name"] for f in resp.json()["fields"]}
+    names = {field["name"] for field in resp.json()["fields"]}
     assert "email" in names and "id" in names
