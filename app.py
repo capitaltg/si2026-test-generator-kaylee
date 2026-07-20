@@ -19,6 +19,7 @@ st.session_state, a dict that persists between reruns.
 
 from __future__ import annotations
 
+import datetime
 import os
 import tempfile
 
@@ -66,6 +67,135 @@ def new_field():
     return {"id": fid, "name": f"column_{fid + 1}", "type": "name"}
 
 
+# Which engine options each field type accepts. This is the single list that
+# both drives the option inputs below and tells the Generate step which options
+# to pass through. Types not listed here (name, email, city, ...) take none.
+TYPE_OPTIONS = {
+    "int": ["min", "max"],
+    "float": ["min", "max", "round"],
+    "money": ["min", "max"],
+    "choice": ["choices", "weights"],
+    "date": ["start", "end"],
+    "pattern": ["pattern"],
+    "constant": ["value"],
+    "sequence": ["prefix", "start"],
+    "bool": ["true_chance"],
+}
+
+
+def render_options(field, fid):
+    """Draw the option inputs for this column's type and store the chosen values
+    in field["options"]. A column whose type takes no options draws nothing.
+
+    Each widget's key is namespaced by the field type (opt_<type>_<name>_<id>).
+    That matters because two types can share an option name as *different* widget
+    kinds (date's "start" is a date picker, sequence's "start" is a number). If
+    both used the same key, switching a column's type would reuse one key for two
+    widget kinds and crash. Namespacing by type keeps them separate.
+    """
+    t = field["type"]
+    opts = field.setdefault("options", {})
+
+    def k(name):
+        return f"opt_{t}_{name}_{fid}"
+
+    if t in ("int", "money"):
+        default_lo, default_hi = (0, 100) if t == "int" else (1000, 1_000_000)
+        c1, c2 = st.columns(2)
+        opts["min"] = c1.number_input(
+            "min", value=int(opts.get("min", default_lo)), key=k("min")
+        )
+        opts["max"] = c2.number_input(
+            "max", value=int(opts.get("max", default_hi)), key=k("max")
+        )
+    elif t == "float":
+        c1, c2, c3 = st.columns(3)
+        opts["min"] = c1.number_input(
+            "min", value=float(opts.get("min", 0.0)), key=k("min")
+        )
+        opts["max"] = c2.number_input(
+            "max", value=float(opts.get("max", 1.0)), key=k("max")
+        )
+        opts["round"] = c3.number_input(
+            "decimals",
+            min_value=0,
+            max_value=10,
+            value=int(opts.get("round", 2)),
+            key=k("round"),
+        )
+    elif t == "choice":
+        # The user types a comma-separated list; we split it into real choices.
+        # We keep the raw text too so the box shows exactly what they typed.
+        raw = st.text_input(
+            "choices (comma-separated)",
+            value=opts.get("choices_raw", ""),
+            key=k("choices"),
+            placeholder="Red, Green, Blue",
+        )
+        opts["choices_raw"] = raw
+        opts["choices"] = [c.strip() for c in raw.split(",") if c.strip()]
+        wraw = st.text_input(
+            "weights (optional, one number per choice)",
+            value=opts.get("weights_raw", ""),
+            key=k("weights"),
+            placeholder="e.g. 5, 3, 1",
+        )
+        opts["weights_raw"] = wraw
+        numbers = []
+        for piece in wraw.split(","):
+            piece = piece.strip()
+            if piece:
+                try:
+                    numbers.append(float(piece))
+                except ValueError:
+                    pass
+        # Only use weights if there is exactly one per choice; otherwise ignore.
+        opts["weights"] = (
+            numbers if numbers and len(numbers) == len(opts["choices"]) else None
+        )
+    elif t == "date":
+        c1, c2 = st.columns(2)
+        start = c1.date_input(
+            "start",
+            value=datetime.date.fromisoformat(opts.get("start", "2000-01-01")),
+            key=k("start"),
+        )
+        end = c2.date_input(
+            "end",
+            value=datetime.date.fromisoformat(opts.get("end", "2025-12-31")),
+            key=k("end"),
+        )
+        # Store as ISO strings; the engine's date type accepts those directly.
+        opts["start"] = start.isoformat()
+        opts["end"] = end.isoformat()
+    elif t == "pattern":
+        opts["pattern"] = st.text_input(
+            "pattern  (# = digit, ? = letter)",
+            value=opts.get("pattern", "CAGE-#####"),
+            key=k("pattern"),
+        )
+    elif t == "constant":
+        opts["value"] = st.text_input(
+            "value (same on every row)", value=opts.get("value", ""), key=k("value")
+        )
+    elif t == "sequence":
+        c1, c2 = st.columns(2)
+        opts["prefix"] = c1.text_input(
+            "prefix", value=opts.get("prefix", ""), key=k("prefix"), placeholder="GS-"
+        )
+        opts["start"] = c2.number_input(
+            "start", value=int(opts.get("start", 1)), key=k("start")
+        )
+    elif t == "bool":
+        opts["true_chance"] = st.slider(
+            "chance of True",
+            0.0,
+            1.0,
+            value=float(opts.get("true_chance", 0.5)),
+            key=k("true_chance"),
+        )
+
+
 # --- One-time setup of the builder's state -----------------------------------
 
 # This block runs only on the very first load (when "schema" is not in state
@@ -95,31 +225,40 @@ types = available_field_types()  # the dropdown options, straight from the engin
 # copy avoids "changed size during iteration" surprises.
 for field in list(st.session_state["schema"]):
     fid = field["id"]
-    # Three columns of the layout: name box (wide), type dropdown (wide), and a
-    # small remove button. The numbers are relative widths.
-    name_col, type_col, remove_col = st.columns([4, 4, 1])
+    # Each column is a bordered card holding its name/type row and, underneath,
+    # the option inputs for whatever type is selected.
+    with st.container(border=True):
+        # Three columns of the layout: name box (wide), type dropdown (wide),
+        # and a small remove button. The numbers are relative widths.
+        name_col, type_col, remove_col = st.columns([4, 4, 1])
 
-    # value= sets the starting text; key= gives this widget a stable identity so
-    # Streamlit remembers it across reruns. Assigning back into field["name"]
-    # updates the dict living in session_state (field is a reference to it).
-    field["name"] = name_col.text_input(
-        "Name", value=field["name"], key=f"name_{fid}", label_visibility="collapsed"
-    )
-    field["type"] = type_col.selectbox(
-        "Type",
-        options=types,
-        index=types.index(field["type"]),
-        key=f"type_{fid}",
-        label_visibility="collapsed",
-    )
-    # A remove button returns True only on the rerun where it was clicked. We
-    # rebuild the list without this id, then st.rerun() re-executes the script
-    # immediately so the row disappears right away.
-    if remove_col.button("✕", key=f"rm_{fid}", help="Remove this column"):
-        st.session_state["schema"] = [
-            f for f in st.session_state["schema"] if f["id"] != fid
-        ]
-        st.rerun()
+        # value= sets the starting text; key= gives this widget a stable identity
+        # so Streamlit remembers it across reruns. Assigning back into
+        # field["name"] updates the dict in session_state (field is a reference).
+        field["name"] = name_col.text_input(
+            "Name",
+            value=field["name"],
+            key=f"name_{fid}",
+            label_visibility="collapsed",
+        )
+        field["type"] = type_col.selectbox(
+            "Type",
+            options=types,
+            index=types.index(field["type"]),
+            key=f"type_{fid}",
+            label_visibility="collapsed",
+        )
+        # A remove button returns True only on the rerun where it was clicked. We
+        # rebuild the list without this id, then st.rerun() re-executes the
+        # script immediately so the row disappears right away.
+        if remove_col.button("✕", key=f"rm_{fid}", help="Remove this column"):
+            st.session_state["schema"] = [
+                f for f in st.session_state["schema"] if f["id"] != fid
+            ]
+            st.rerun()
+
+        # The type-specific option inputs (min/max, choices, dates, ...).
+        render_options(field, fid)
 
 # The add button sits below the rows. On click we append a fresh column and
 # rerun so it shows up immediately.
@@ -137,27 +276,50 @@ seed = st.number_input("Seed", value=42, disabled=not use_seed) if use_seed else
 
 # --- Generate ----------------------------------------------------------------
 
-# These types need an extra option to work (choice -> a choices list, pattern ->
-# a template, constant -> a value). The UI cannot set those until the next
-# ticket (#12), so we catch them up front with a clear message rather than let
-# the engine raise a cryptic KeyError like 'value'.
-NEEDS_OPTIONS = {"choice", "pattern", "constant"}
+
+def build_schema():
+    """Turn the builder state into the schema the engine expects.
+
+    For each column we keep name + type, then add only the options that belong
+    to that type (from TYPE_OPTIONS), skipping any that are unset. The internal
+    "id" and the raw text helpers (choices_raw, ...) are left out.
+    """
+    schema = []
+    for f in st.session_state["schema"]:
+        spec = {"name": f["name"], "type": f["type"]}
+        for key in TYPE_OPTIONS.get(f["type"], []):
+            value = f.get("options", {}).get(key)
+            if value is not None:
+                spec[key] = value
+        schema.append(spec)
+    return schema
+
+
+def schema_problems(schema):
+    """Return a list of human-readable issues to fix before generating, e.g. a
+    choice column with no choices, or min greater than max."""
+    problems = []
+    for f in schema:
+        if f["type"] == "choice" and not f.get("choices"):
+            problems.append(f'"{f["name"]}" (choice) needs at least one choice')
+        if f["type"] == "pattern" and not f.get("pattern"):
+            problems.append(f'"{f["name"]}" (pattern) needs a template')
+        if (
+            f["type"] in ("int", "float", "money")
+            and f.get("min") is not None
+            and f.get("max") is not None
+            and f["min"] > f["max"]
+        ):
+            problems.append(f'"{f["name"]}": min is greater than max')
+    return problems
+
 
 if st.button("Generate data", type="primary"):
-    # Build the schema the engine expects: just name + type per column. We drop
-    # our internal "id" (the engine does not need it). Per-type options like
-    # min/max arrive in the next ticket.
-    schema = [
-        {"name": f["name"], "type": f["type"]} for f in st.session_state["schema"]
-    ]
-    waiting = sorted({f["type"] for f in schema if f["type"] in NEEDS_OPTIONS})
-    if waiting:
+    schema = build_schema()
+    problems = schema_problems(schema)
+    if problems:
         st.session_state.pop("rows", None)
-        st.warning(
-            "These types need extra options that the UI cannot set yet: "
-            f"**{', '.join(waiting)}**. They arrive in the next update (#12). "
-            "For now, pick a different type for those columns."
-        )
+        st.warning("Fix these before generating:\n\n- " + "\n- ".join(problems))
     else:
         try:
             st.session_state["rows"] = generate(schema, rows=int(rows), seed=seed)
