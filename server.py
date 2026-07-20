@@ -37,6 +37,12 @@ from testgen import (
     to_sql_string,
     to_sqlite_bytes,
 )
+from testgen.infer import (
+    from_csv_headers,
+    from_description,
+    infer_json_sample,
+    parse_ddl,
+)
 
 app = FastAPI(title="Fixtura API", version="0.1.0")
 
@@ -64,6 +70,22 @@ class GenerateRequest(BaseModel):
 class ExportRequest(GenerateRequest):
     format: str = "csv"  # csv | sql | sqlite | json
     table: str = "records"
+
+
+class DdlRequest(BaseModel):
+    ddl: str
+
+
+class CsvRequest(BaseModel):
+    csv: str
+
+
+class JsonSampleRequest(BaseModel):
+    sample: str
+
+
+class DescribeRequest(BaseModel):
+    text: str
 
 
 def _schema_from(fields: List[FieldSpec]) -> List[dict]:
@@ -141,12 +163,57 @@ def export(req: ExportRequest) -> Response:
     )
 
 
+# --- Schema builders: turn something you already have into a schema ----------
+
+
+@app.post("/schema/from-ddl")
+def schema_from_ddl(req: DdlRequest) -> dict:
+    """Parse a CREATE TABLE statement into a schema (plus the table name)."""
+    try:
+        table, fields = parse_ddl(req.ddl)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    return {"table": table, "fields": fields}
+
+
+@app.post("/schema/from-csv")
+def schema_from_csv(req: CsvRequest) -> dict:
+    """Build a schema from a CSV header row."""
+    try:
+        return {"fields": from_csv_headers(req.csv)}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/schema/from-json")
+def schema_from_json(req: JsonSampleRequest) -> dict:
+    """Infer a schema from a sample JSON object or array."""
+    try:
+        return {"fields": infer_json_sample(req.sample)}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/schema/from-description")
+def schema_from_description(req: DescribeRequest) -> dict:
+    """Build a schema from a plain-English description (keyword rules, no AI)."""
+    return {"fields": from_description(req.text)}
+
+
 @app.get("/")
 def root() -> dict:
     """A tiny landing response until the Fixtura front end is served here (P4)."""
     return {
         "name": "Fixtura API",
-        "endpoints": ["GET /field-types", "POST /generate", "POST /export"],
+        "endpoints": [
+            "GET /field-types",
+            "POST /generate",
+            "POST /export",
+            "POST /schema/from-ddl",
+            "POST /schema/from-csv",
+            "POST /schema/from-json",
+            "POST /schema/from-description",
+        ],
     }
 
 
