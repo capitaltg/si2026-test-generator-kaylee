@@ -198,9 +198,11 @@ function renderOutputTabs() {
   document.querySelectorAll(".preset").forEach((b) => {
     b.classList.toggle("active", Number(b.dataset.rows) === Number(state.rowCount));
   });
-  // If the count isn't a preset, it's a custom value: highlight the box instead.
+  // When a preset is selected, leave the custom box empty so its faded "custom"
+  // placeholder shows. Only when the count is a custom value does the box hold
+  // (and highlight) that number.
   const box = $("#rowCount");
-  box.value = state.rowCount;
+  box.value = isPreset ? "" : state.rowCount;
   box.classList.toggle("active", !isPreset);
 }
 
