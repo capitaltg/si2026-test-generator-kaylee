@@ -193,10 +193,15 @@ function renderOutputTabs() {
         `<button class="tab ${state.outputTab === t ? "active" : ""}" data-otab="${t}" style="flex:0 0 auto;padding:7px 15px">${t.toUpperCase()}</button>`
     )
     .join("");
+  const presetValues = [10, 100, 1000, 10000];
+  const isPreset = presetValues.includes(Number(state.rowCount));
   document.querySelectorAll(".preset").forEach((b) => {
     b.classList.toggle("active", Number(b.dataset.rows) === Number(state.rowCount));
   });
-  $("#rowCount").value = state.rowCount;
+  // If the count isn't a preset, it's a custom value: highlight the box instead.
+  const box = $("#rowCount");
+  box.value = state.rowCount;
+  box.classList.toggle("active", !isPreset);
 }
 
 function cellHtml(value) {
