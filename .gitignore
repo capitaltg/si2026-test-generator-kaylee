@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# testgen generated output (data files the tool produces)
+*.csv
+*.sql
+*.db

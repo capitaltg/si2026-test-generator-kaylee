@@ -13,6 +13,13 @@ requires-python = ">=3.9"
 # reproducible. A PDF library gets added in Ticket 5.
 dependencies = ["Faker"]
 
+# Optional extras. These are NOT installed by a plain `pip install .`; you opt
+# in by name. The `ui` group holds everything the web front door needs, so the
+# core engine stays lightweight for people who only want the library or CLI.
+#   pip install ".[ui]"   installs testgen + Streamlit for the website.
+[project.optional-dependencies]
+ui = ["streamlit"]
+
 # This line is what turns `testgen` into a real terminal command after
 # `pip install .`. It says: when someone runs `testgen`, call the main()
 # function in testgen/cli.py.
