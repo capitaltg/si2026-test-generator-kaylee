@@ -20,7 +20,7 @@
   --border: #dde1e7;
   --border-soft: #e2e6ec;
   --field-bg: #fbfcfd;
-  --code-bg: #ffffff;
+  --code-bg: #f5f7fa;
   --code-fg: #1b1b1b;
 
   --mono: "IBM Plex Mono", ui-monospace, monospace;
@@ -156,7 +156,7 @@ tr:nth-child(even) td { background: #fafbfc; }
 
 .code-view { background: var(--code-bg); color: var(--code-fg); font-family: var(--mono); font-size: 12.5px; line-height: 1.7; padding: 12px 0; margin: 0; min-height: 100%; }
 .code-view .line { display: flex; }
-.code-view .ln { flex: 0 0 auto; width: 52px; text-align: right; padding-right: 14px; color: #b2bac6; user-select: none; }
+.code-view .ln { flex: 0 0 auto; width: 52px; text-align: right; padding-right: 14px; margin-right: 14px; color: #9aa4b2; user-select: none; border-right: 1px solid #e2e6ec; }
 .code-view .lt { white-space: pre; padding-right: 24px; }
 
 .footer { flex: 0 0 auto; border-top: 1px solid var(--border-soft); background: #fafbfc; padding: 8px 18px; display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--muted); }
