@@ -189,6 +189,8 @@ def test_every_grouped_type_generates():
                 field["values"] = "a, b, c"
             if type_name == "constant":
                 field["value"] = "X"
+            if type_name == "pattern":
+                field["pattern"] = "AB-####"
             schema.append(field)
     rows = generate(schema, rows=3, seed=1)
     assert len(rows) == 3

@@ -399,6 +399,7 @@ FIELD_TYPE_GROUPS = [
         "Location",
         [
             ("streetAddress", "Street address"),
+            ("address", "Full address"),
             ("city", "City"),
             ("state", "State"),
             ("zip", "Zip code"),
@@ -434,6 +435,7 @@ FIELD_TYPE_GROUPS = [
             ("word", "Word"),
             ("sentence", "Sentence"),
             ("paragraph", "Paragraph"),
+            ("pattern", "Pattern (custom code)"),
             ("enum", "Enum (custom)"),
             ("constant", "Constant"),
         ],
