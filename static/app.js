@@ -14,6 +14,11 @@ const state = {
   rowCount: 25,
   inputTab: "builder",
   outputTab: "table",
+  pdfMode: "table", // PDF flavour: "table" (one big table) or "docs" (page per row)
+  // Document-PDF layout: a title, per-field placement (header/body/off), the
+  // document style (sheet | letter | form), and a prose template with {field}
+  // placeholders used by the letter style.
+  pdfDoc: { title: "", placement: {}, style: "sheet", template: "" },
   nextId: 0,
   fields: [],
   groups: [], // grouped type menu from the API
@@ -186,24 +191,35 @@ function renderInputPanel() {
 }
 
 function renderOutputTabs() {
-  const tabs = ["table", "json", "csv", "sql"];
+  const tabs = ["table", "json", "csv", "sql", "pdf"];
   $("#outputTabs").innerHTML = tabs
     .map(
       (t) =>
         `<button class="tab ${state.outputTab === t ? "active" : ""}" data-otab="${t}" style="flex:0 0 auto;padding:7px 15px">${t.toUpperCase()}</button>`
     )
     .join("");
-  const presetValues = [10, 100, 1000, 10000];
-  const isPreset = presetValues.includes(Number(state.rowCount));
-  document.querySelectorAll(".preset").forEach((b) => {
-    b.classList.toggle("active", Number(b.dataset.rows) === Number(state.rowCount));
-  });
-  // When a preset is selected, leave the custom box empty so its faded "custom"
-  // placeholder shows. Only when the count is a custom value does the box hold
-  // (and highlight) that number.
+  // PDF is just another export format, so it lives with the other tabs. Its
+  // Table/Doc toggle only makes sense while PDF is selected, and Copy makes no
+  // sense for a binary file, so show each contextually.
+  const isPdf = state.outputTab === "pdf";
+  $("#pdfCtrl").style.display = isPdf ? "" : "none";
+  $("#copy").style.display = isPdf ? "none" : "";
+  renderRowsCtrl();
+}
+
+function renderRowsCtrl() {
+  // Common counts live in the dropdown; the box beside it holds any other
+  // number. Whichever currently holds the active count is highlighted; the
+  // other stays neutral (the box fades to its "custom" placeholder).
+  const presets = [10, 100, 1000, 10000];
+  const rc = Number(state.rowCount);
+  const isPreset = presets.includes(rc);
+  const sel = $("#rowSelect");
   const box = $("#rowCount");
-  box.value = isPreset ? "" : state.rowCount;
+  if (isPreset) sel.value = String(rc);
+  sel.classList.toggle("active", isPreset);
   box.classList.toggle("active", !isPreset);
+  box.value = isPreset ? "" : state.rowCount;
 }
 
 function cellHtml(value) {
@@ -263,6 +279,138 @@ async function exportText(format) {
   return text;
 }
 
+// The placement of a field on the document: header, body, or off (hidden).
+function pdfPlacement(name) {
+  return state.pdfDoc.placement[name] || "body";
+}
+
+// Assemble the pdf_config the server expects from the current doc-layout state.
+function pdfDocConfig() {
+  const d = state.pdfDoc;
+  const names = state.fields.map((f) => f.name);
+  const header = names.filter((n) => pdfPlacement(n) === "header");
+  const body = names.filter((n) => pdfPlacement(n) === "body");
+  const cfg = { title: d.title || state.tableName || "Record", style: d.style };
+  if (header.length) cfg.header_fields = header;
+  if (d.style === "letter" && d.template.trim()) cfg.body_template = d.template;
+  else cfg.body_fields = body;
+  return cfg;
+}
+
+// A starter letter seeded when prose mode is first switched on, so the change is
+// immediately visible and there's something concrete to edit.
+function defaultDocTemplate() {
+  const names = state.fields.map((f) => f.name);
+  if (!names.length) return "Dear recipient,\n\n\n\nSincerely,";
+  const body = names.map((n) => `${n.replace(/_/g, " ")}: {${n}}`).join("\n");
+  return `Dear recipient,\n\n${body}\n\nSincerely,`;
+}
+
+// The doc-layout controls (title, per-field placement, optional prose template).
+function pdfControlsHtml() {
+  const d = state.pdfDoc;
+  const n = Number(state.rowCount) || 0;
+  const fieldRows = state.fields
+    .map((f) => {
+      const p = pdfPlacement(f.name);
+      const seg = (val, lbl) =>
+        `<button class="pdf-seg ${p === val ? "active" : ""}" data-place="${escapeHtml(f.name)}" data-val="${val}">${lbl}</button>`;
+      return (
+        `<div class="pdf-field"><span class="pdf-fname">${escapeHtml(f.name)}</span>` +
+        `<span class="pdf-segs">${seg("header", "Header")}${seg("body", "Body")}${seg("off", "Off")}</span></div>`
+      );
+    })
+    .join("");
+  const tokens = state.fields.map((f) => `{${f.name}}`).join("  ");
+  const styleBtn = (val, lbl) =>
+    `<button class="pdf-seg ${d.style === val ? "active" : ""}" data-style="${val}">${lbl}</button>`;
+  const placementLabel =
+    d.style === "form"
+      ? "Header fields fill the numbered boxes; Body fields become the schedule; an amount-like field becomes the total."
+      : d.style === "letter"
+        ? "Header fields show above the letter; Body fields are unused in letter mode."
+        : "Header fields show in a top block; Body fields list below.";
+  return (
+    `<div class="pdf-controls">` +
+    `<div class="pdf-ctl">Style<span class="pdf-segs">${styleBtn("sheet", "Sheet")}${styleBtn("letter", "Letter")}${styleBtn("form", "Form")}</span></div>` +
+    `<label class="pdf-ctl">Title<input id="pdfTitle" type="text" value="${escapeHtml(d.title)}" placeholder="${escapeHtml(state.tableName || "Record")}" /></label>` +
+    `<div class="pdf-fields">${fieldRows}</div>` +
+    `<div class="pdf-hint">${placementLabel}</div>` +
+    (d.style === "letter"
+      ? `<textarea id="pdfTemplate" class="pdf-template" placeholder="Dear {vendor},&#10;&#10;This confirms contract {contract_id}…">${escapeHtml(d.template)}</textarea>` +
+        `<div class="pdf-hint">Placeholders: ${escapeHtml(tokens)}</div>`
+      : "") +
+    (n > 500
+      ? `<div class="pdf-warn">Document mode is capped at 500 pages — reduce rows to export all ${n.toLocaleString()}.</div>`
+      : "") +
+    `</div>`
+  );
+}
+
+// The whole PDF tab: layout controls (docs only) above a live embedded preview.
+function pdfPaneHtml() {
+  const controls =
+    state.pdfMode === "docs"
+      ? pdfControlsHtml()
+      : `<div class="pdf-controls"><div class="pdf-hint">Table report — the full dataset as one paginated table. Set the row count above and click Export.</div></div>`;
+  return (
+    `<div class="pdf-pane">` +
+    controls +
+    `<div class="pdf-preview"><iframe id="pdfFrame" title="PDF preview"></iframe>` +
+    `<div class="pdf-preview-note" id="pdfNote">Building preview…</div></div>` +
+    `</div>`
+  );
+}
+
+let pdfPreviewTimer = null;
+let lastPdfUrl = null;
+// Debounced so typing in the title/template doesn't fire a request per keystroke.
+function refreshPdfPreview() {
+  clearTimeout(pdfPreviewTimer);
+  pdfPreviewTimer = setTimeout(loadPdfPreview, 350);
+}
+
+// The preview caption, worded per mode: the table is ONE document measured in
+// rows, so "first N of M pages" would wrongly imply N pages; docs really are one
+// page per record, so pages is the right unit there.
+function previewNote(docs, shown, total) {
+  const n = total.toLocaleString();
+  if (docs) {
+    const unit = total === 1 ? "page" : "pages";
+    return shown < total ? `Preview · first ${shown} of ${n} ${unit} · Export for all` : `Preview · ${n} ${unit}`;
+  }
+  const unit = total === 1 ? "row" : "rows";
+  return shown < total ? `Preview · first ${shown} of ${n} ${unit} · Export for all` : `Preview · full table · ${n} ${unit}`;
+}
+
+async function loadPdfPreview() {
+  const frame = $("#pdfFrame");
+  const note = $("#pdfNote");
+  if (!frame) return; // not on the PDF tab
+  const docs = state.pdfMode === "docs";
+  const total = Number(state.rowCount) || 0;
+  // Keep the preview snappy: a few pages for docs, a screenful for the table.
+  const previewRows = Math.min(total || 1, docs ? 3 : 50);
+  const body = {
+    fields: buildFields(),
+    rows: previewRows,
+    seed: state.seed,
+    format: docs ? "pdf-docs" : "pdf-table",
+    table: state.tableName,
+  };
+  if (docs) body.pdf_config = pdfDocConfig();
+  try {
+    const resp = await postJSON("/export", body);
+    const blob = await resp.blob();
+    if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
+    lastPdfUrl = URL.createObjectURL(blob);
+    frame.src = lastPdfUrl + "#toolbar=0&navpanes=0&view=FitH";
+    if (note) note.textContent = previewNote(docs, previewRows, total);
+  } catch (e) {
+    if (note) note.textContent = "Preview error: " + e.message;
+  }
+}
+
 async function renderOutput() {
   const body = $("#outputBody");
   const tab = state.outputTab;
@@ -270,6 +418,9 @@ async function renderOutput() {
     body.innerHTML = tableHtml();
   } else if (tab === "json") {
     body.innerHTML = codeHtml(JSON.stringify(state.rows, null, 2));
+  } else if (tab === "pdf") {
+    body.innerHTML = pdfPaneHtml();
+    refreshPdfPreview();
   } else {
     body.innerHTML = `<div class="placeholder">Building ${tab.toUpperCase()}…</div>`;
     try {
@@ -330,26 +481,46 @@ function removeField(id) {
   generate();
 }
 
+// Shared download: POST /export and save the returned file. `extra` is merged
+// into the request body (used to pass pdf_config for the document PDF).
+async function saveExport(format, ext, extra) {
+  const resp = await postJSON("/export", {
+    fields: buildFields(),
+    rows: Math.min(Number(state.rowCount) || 0, 50000),
+    seed: state.seed,
+    format,
+    table: state.tableName,
+    ...(extra || {}),
+  });
+  const blob = await resp.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = (state.tableName || "data") + "." + ext;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("Downloaded " + a.download);
+}
+
 async function download() {
-  const format = state.outputTab === "table" ? "csv" : state.outputTab;
+  // Export follows the active output tab. For PDF the Table/Doc toggle picks the
+  // flavour; document mode passes a light pdf_config (the seam where a richer,
+  // e.g. award-letter, layout plugs in later — for now it just titles each doc).
+  const tab = state.outputTab;
+  let format, ext, extra;
+  if (tab === "pdf") {
+    const docs = state.pdfMode === "docs";
+    format = docs ? "pdf-docs" : "pdf-table";
+    ext = "pdf";
+    extra = docs ? { pdf_config: pdfDocConfig() } : {};
+  } else {
+    format = tab === "table" ? "csv" : tab;
+    ext = { csv: "csv", sql: "sql", json: "json", sqlite: "db" }[format] || format;
+    extra = {};
+  }
   try {
-    const resp = await postJSON("/export", {
-      fields: buildFields(),
-      rows: Math.min(Number(state.rowCount) || 0, 50000),
-      seed: state.seed,
-      format,
-      table: state.tableName,
-    });
-    const blob = await resp.blob();
-    const ext = { csv: "csv", sql: "sql", json: "json", sqlite: "db" }[format] || format;
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = (state.tableName || "data") + "." + ext;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    toast("Downloaded " + a.download);
+    await saveExport(format, ext, extra);
   } catch (e) {
     toast("Export failed: " + e.message);
   }
@@ -357,6 +528,10 @@ async function download() {
 
 async function copyOutput() {
   const tab = state.outputTab;
+  if (tab === "pdf") {
+    toast("PDF can't be copied — use Export to download");
+    return;
+  }
   let text;
   if (tab === "table" || tab === "json") text = JSON.stringify(state.rows, null, 2);
   else text = await exportText(tab);
@@ -375,6 +550,46 @@ function wireEvents() {
   $("#download").addEventListener("click", download);
   $("#copy").addEventListener("click", copyOutput);
 
+  // PDF Table/Doc toggle: remember the choice, highlight the active button, and
+  // refresh the info panel so it reflects the new style.
+  $("#pdfCtrl").addEventListener("click", (e) => {
+    const b = e.target.closest(".pdf-mode");
+    if (!b) return;
+    state.pdfMode = b.dataset.pdfmode;
+    document
+      .querySelectorAll(".pdf-mode")
+      .forEach((x) => x.classList.toggle("active", x.dataset.pdfmode === state.pdfMode));
+    if (state.outputTab === "pdf") renderOutput();
+  });
+
+  // PDF layout controls live inside the output body, which is re-rendered often,
+  // so listen on the stable parent. Title/template edits only refresh the
+  // preview (keeps focus); placement and the template toggle re-render the pane.
+  const outBody = $("#outputBody");
+  outBody.addEventListener("input", (e) => {
+    if (e.target.id === "pdfTitle") {
+      state.pdfDoc.title = e.target.value;
+      refreshPdfPreview();
+    } else if (e.target.id === "pdfTemplate") {
+      state.pdfDoc.template = e.target.value;
+      refreshPdfPreview();
+    }
+  });
+  outBody.addEventListener("click", (e) => {
+    const seg = e.target.closest(".pdf-seg");
+    if (!seg) return;
+    if (seg.dataset.style) {
+      state.pdfDoc.style = seg.dataset.style;
+      // Seed a starter letter the first time letter mode is chosen.
+      if (seg.dataset.style === "letter" && !state.pdfDoc.template.trim()) {
+        state.pdfDoc.template = defaultDocTemplate();
+      }
+    } else if (seg.dataset.place) {
+      state.pdfDoc.placement[seg.dataset.place] = seg.dataset.val;
+    }
+    renderOutput();
+  });
+
   $("#tableName").addEventListener("change", (e) => {
     state.tableName = e.target.value;
   });
@@ -384,6 +599,12 @@ function wireEvents() {
   });
   $("#rowCount").addEventListener("change", (e) => {
     state.rowCount = Math.max(1, Math.min(100000, Number(e.target.value) || 1));
+    renderOutputTabs();
+    generate();
+  });
+  // Rows dropdown: picking a preset sets the count and clears the custom box.
+  $("#rowSelect").addEventListener("change", (e) => {
+    state.rowCount = Number(e.target.value);
     renderOutputTabs();
     generate();
   });
@@ -399,14 +620,6 @@ function wireEvents() {
   });
   $("#customColor").addEventListener("input", (e) => applyCustom(e.target.value));
 
-  // Row-count preset buttons + output tabs (both in the output bar).
-  $("#rowsCtrl").addEventListener("click", (e) => {
-    const b = e.target.closest(".preset");
-    if (!b) return;
-    state.rowCount = Number(b.dataset.rows);
-    renderOutputTabs();
-    generate();
-  });
   $("#outputTabs").addEventListener("click", (e) => {
     const b = e.target.closest("[data-otab]");
     if (!b) return;

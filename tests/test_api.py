@@ -83,6 +83,39 @@ def test_export_unknown_format_is_400():
     assert resp.status_code == 400
 
 
+def test_export_pdf_table_is_a_pdf():
+    body = {"fields": [{"name": "v", "type": "int"}], "rows": 3, "seed": 1}
+    resp = client.post("/export", json={**body, "format": "pdf-table", "table": "t"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert 'filename="t.pdf"' in resp.headers["content-disposition"]
+    assert resp.content[:5] == b"%PDF-"
+
+
+def test_export_pdf_docs_is_a_pdf():
+    body = {"fields": [{"name": "v", "type": "int"}], "rows": 3, "seed": 1}
+    resp = client.post(
+        "/export",
+        json={
+            **body,
+            "format": "pdf-docs",
+            "table": "t",
+            "pdf_config": {"title": "Notice", "title_field": "v"},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.content[:5] == b"%PDF-"
+
+
+def test_export_pdf_docs_over_page_cap_is_400():
+    # 600 rows would be 600 pages, past the default document cap; the server
+    # should surface that as a friendly 400, not a 500.
+    body = {"fields": [{"name": "v", "type": "int"}], "rows": 600, "seed": 1}
+    resp = client.post("/export", json={**body, "format": "pdf-docs"})
+    assert resp.status_code == 400
+
+
 # --- schema builder endpoints ---
 
 

@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.9"
 # Runtime dependencies. Faker generates the individual realistic values
 # (names, companies, addresses); it is seedable, which keeps our output
-# reproducible. A PDF library gets added in Ticket 5.
-dependencies = ["Faker"]
+# reproducible. fpdf2 is a small, pure-Python PDF library; it is a core (not
+# optional) dependency because producing realistic sample PDFs is a core purpose
+# of this tool, not an add-on.
+dependencies = ["Faker", "fpdf2"]
 
 # Optional extras. These are NOT installed by a plain `pip install .`; you opt
 # in by name. The `web` group holds everything the Fixtura web front door needs
