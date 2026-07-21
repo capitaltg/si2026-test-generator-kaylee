@@ -36,6 +36,8 @@ from testgen import (
     field_type_groups,
     generate,
     to_csv_string,
+    to_pdf_docs_bytes,
+    to_pdf_table_bytes,
     to_sql_string,
     to_sqlite_bytes,
 )
@@ -70,8 +72,11 @@ class GenerateRequest(BaseModel):
 
 
 class ExportRequest(GenerateRequest):
-    format: str = "csv"  # csv | sql | sqlite | json
+    format: str = "csv"  # csv | sql | sqlite | json | pdf-table | pdf-docs
     table: str = "records"
+    # Optional light layout config for the document PDF (pdf-docs): title,
+    # title_field, header_fields, body_fields. Ignored by every other format.
+    pdf_config: Optional[dict] = None
 
 
 class DdlRequest(BaseModel):
@@ -124,23 +129,39 @@ def generate_rows(req: GenerateRequest) -> dict:
     return {"rows": _make_rows(req)}
 
 
-# How each export format is built and served.
+# How each export format is built and served. Each build fn takes (rows, req)
+# so the PDF builders can reach the schema (for column order) and pdf_config;
+# the simpler formats just use req.table.
 _EXPORTS = {
-    "csv": ("text/csv", "csv", lambda rows, table: to_csv_string(rows).encode()),
+    "csv": ("text/csv", "csv", lambda rows, req: to_csv_string(rows).encode()),
     "sql": (
         "text/plain",
         "sql",
-        lambda rows, table: to_sql_string(rows, table=table).encode(),
+        lambda rows, req: to_sql_string(rows, table=req.table).encode(),
     ),
     "json": (
         "application/json",
         "json",
-        lambda rows, table: json.dumps(rows, indent=2, default=str).encode(),
+        lambda rows, req: json.dumps(rows, indent=2, default=str).encode(),
     ),
     "sqlite": (
         "application/x-sqlite3",
         "db",
-        lambda rows, table: to_sqlite_bytes(rows, table=table),
+        lambda rows, req: to_sqlite_bytes(rows, table=req.table),
+    ),
+    # The whole dataset as one paginated table.
+    "pdf-table": (
+        "application/pdf",
+        "pdf",
+        lambda rows, req: to_pdf_table_bytes(_schema_from(req.fields), rows),
+    ),
+    # One formatted page per row, laid out from the optional pdf_config.
+    "pdf-docs": (
+        "application/pdf",
+        "pdf",
+        lambda rows, req: to_pdf_docs_bytes(
+            _schema_from(req.fields), rows, config=req.pdf_config
+        ),
     ),
 }
 
@@ -156,7 +177,11 @@ def export(req: ExportRequest) -> Response:
         )
     rows = _make_rows(req)
     media_type, ext, build = _EXPORTS[req.format]
-    content = build(rows, req.table)
+    try:
+        content = build(rows, req)
+    except ValueError as error:
+        # e.g. document PDF asked for more pages than the per-row limit allows.
+        raise HTTPException(status_code=400, detail=str(error))
     filename = f"{req.table or 'data'}.{ext}"
     return Response(
         content=content,

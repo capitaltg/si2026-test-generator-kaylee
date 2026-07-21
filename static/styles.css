@@ -132,15 +132,43 @@ body {
 .placeholder { padding: 24px 16px; color: var(--muted); font-size: 13px; }
 
 /* --- output --- */
-.output-bar { flex: 0 0 auto; border-bottom: 1px solid var(--border-soft); padding: 12px 18px; display: flex; align-items: center; gap: 14px; }
-.rows-ctrl { display: flex; align-items: center; gap: 5px; }
+.output-bar { flex: 0 0 auto; border-bottom: 1px solid var(--border-soft); padding: 12px 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 10px; }
+.rows-ctrl { display: flex; align-items: center; gap: 6px; }
 .rows-ctrl .lbl { font-size: 11.5px; color: var(--faint); font-weight: 600; margin-right: 3px; }
-.preset { border: 1px solid #dfe3e9; background: #fff; color: var(--muted); border-radius: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: var(--mono); }
-.preset.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-.rows-ctrl input { width: 88px; border: 1px solid #dfe3e9; border-radius: 6px; padding: 5px 9px; font-family: var(--mono); font-size: 12.5px; outline: none; }
-/* When the row count is a custom number (not one of the presets), highlight the
-   box so it is clear that it holds the active choice. */
+.rows-ctrl select { border: 1px solid #dfe3e9; border-radius: 6px; padding: 5px 9px; font-family: var(--mono); font-size: 12.5px; background: #fff; color: var(--ink); outline: none; cursor: pointer; }
+.rows-ctrl select:focus { border-color: var(--accent); }
+.rows-ctrl input { width: 84px; border: 1px solid #dfe3e9; border-radius: 6px; padding: 5px 9px; font-family: var(--mono); font-size: 12.5px; outline: none; }
+.rows-ctrl input:focus { border-color: var(--accent); }
+/* Highlight whichever control holds the active row count. */
+.rows-ctrl select.active,
 .rows-ctrl input.active { border-color: var(--accent); background: #eef4fb; color: var(--accent-dark); font-weight: 600; }
+
+/* PDF Table/Doc toggle: a small segmented control, same visual language as the
+   row-count presets so the output bar reads as one family of controls. */
+.pdf-ctrl { display: inline-flex; gap: 2px; background: var(--bg); border-radius: 7px; padding: 2px; }
+.pdf-mode { border: none; background: transparent; color: var(--muted); border-radius: 6px; padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer; font-family: var(--sans); }
+.pdf-mode.active { background: var(--accent); color: #fff; }
+
+/* The PDF tab: layout controls above a live embedded preview. */
+.pdf-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.pdf-controls { flex: 0 0 auto; max-height: 46%; overflow-y: auto; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); background: #fafbfc; display: flex; flex-direction: column; gap: 10px; }
+.pdf-ctl { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.pdf-ctl input[type="text"] { width: 280px; border: 1px solid #dfe3e9; border-radius: 6px; padding: 6px 9px; font-family: var(--mono); font-size: 12.5px; outline: none; background: #fff; }
+.pdf-ctl input[type="text"]:focus { border-color: var(--accent); }
+.pdf-check { cursor: pointer; }
+.pdf-fields { display: flex; flex-wrap: wrap; gap: 8px; }
+.pdf-field { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border-soft); border-radius: 8px; padding: 4px 5px 4px 10px; background: #fff; }
+.pdf-fname { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.pdf-segs { display: inline-flex; gap: 2px; background: var(--bg); border-radius: 6px; padding: 2px; }
+.pdf-seg { border: none; background: transparent; color: var(--muted); border-radius: 5px; padding: 3px 8px; font-size: 11px; font-weight: 600; cursor: pointer; font-family: var(--sans); }
+.pdf-seg.active { background: var(--accent); color: #fff; }
+.pdf-template { width: 100%; min-height: 92px; border: 1px solid #dfe3e9; border-radius: 8px; padding: 9px 11px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; outline: none; resize: vertical; }
+.pdf-template:focus { border-color: var(--accent); }
+.pdf-hint { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.pdf-warn { color: #b25000; font-weight: 600; font-size: 12px; }
+.pdf-preview { flex: 1; min-height: 0; position: relative; background: #e9edf2; }
+.pdf-preview iframe { width: 100%; height: 100%; border: none; display: block; }
+.pdf-preview-note { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: rgba(22, 46, 81, .85); color: #fff; font-size: 11px; padding: 4px 11px; border-radius: 6px; pointer-events: none; }
 
 .output-body { flex: 1; min-height: 0; overflow: auto; }
 table.grid { border-collapse: collapse; width: 100%; font-size: 13px; }

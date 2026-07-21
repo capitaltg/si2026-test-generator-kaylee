@@ -20,6 +20,7 @@ from .infer import (
     infer_json_sample,
     parse_ddl,
 )
+from .pdf import to_pdf_docs_bytes, to_pdf_table_bytes
 from .writers import to_csv_string, to_sql_string, to_sqlite_bytes, write_sqlite
 
 __version__ = "0.1.0"
@@ -37,5 +38,7 @@ __all__ = [
     "to_sql_string",
     "write_sqlite",
     "to_sqlite_bytes",
+    "to_pdf_table_bytes",
+    "to_pdf_docs_bytes",
     "__version__",
 ]
