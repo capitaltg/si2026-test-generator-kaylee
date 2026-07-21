@@ -125,3 +125,33 @@ def test_docs_form_style_works_with_no_header_fields():
         FIELDS, ROWS, config={"style": "form", "header_fields": []}
     )
     assert _is_pdf(data)
+
+
+def test_docs_form_renders_nested_list_schedule():
+    # A body field that is a list of child records (CLINs) becomes a schedule
+    # table; it must render without crashing, one page per parent row.
+    fields = [{"name": "contract_id", "type": "x"}, {"name": "clins", "type": "list"}]
+    rows = [
+        {
+            "contract_id": "GS-1",
+            "clins": [
+                {"clin": "0001", "amount": 100},
+                {"clin": "0002", "amount": 200},
+            ],
+        }
+    ]
+    config = {
+        "style": "form",
+        "header_fields": ["contract_id"],
+        "body_fields": ["clins"],
+    }
+    data = to_pdf_docs_bytes(fields, rows, config=config)
+    assert _is_pdf(data)
+    assert _page_count(data) == 1
+
+
+def test_docs_sheet_renders_empty_nested_list():
+    # An empty list should render an "(no line items)" row, not crash.
+    fields = [{"name": "clins", "type": "list"}]
+    rows = [{"clins": []}]
+    assert _is_pdf(to_pdf_docs_bytes(fields, rows, config={"body_fields": ["clins"]}))

@@ -20,7 +20,15 @@ from .infer import (
     infer_json_sample,
     parse_ddl,
 )
+from .fillable import render_fillable
+from .formfill import available_forms, fill_form_bytes, fill_forms_bytes
 from .pdf import to_pdf_docs_bytes, to_pdf_table_bytes
+from .presets import (
+    PRESETS,
+    generate_preset,
+    list_presets,
+    preset_form_values,
+)
 from .writers import to_csv_string, to_sql_string, to_sqlite_bytes, write_sqlite
 
 __version__ = "0.1.0"
@@ -40,5 +48,13 @@ __all__ = [
     "to_sqlite_bytes",
     "to_pdf_table_bytes",
     "to_pdf_docs_bytes",
+    "available_forms",
+    "fill_form_bytes",
+    "fill_forms_bytes",
+    "render_fillable",
+    "PRESETS",
+    "list_presets",
+    "generate_preset",
+    "preset_form_values",
     "__version__",
 ]

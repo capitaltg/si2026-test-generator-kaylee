@@ -92,6 +92,58 @@ def test_constant_type_is_the_same_on_every_row():
     assert all(r["fy"] == "FY2024" for r in rows)
 
 
+def test_list_type_produces_nested_records():
+    schema = [
+        {"name": "contract", "type": "sequence", "prefix": "C-", "start": 1},
+        {
+            "name": "clins",
+            "type": "list",
+            "count": 3,
+            "fields": [
+                {"name": "clin", "type": "sequence", "prefix": "000", "start": 1},
+                {"name": "amount", "type": "int", "min": 1, "max": 9},
+            ],
+        },
+    ]
+    rows = generate(schema, rows=2, seed=1)
+    assert len(rows) == 2
+    first = rows[0]["clins"]
+    assert isinstance(first, list) and len(first) == 3
+    # each child is a dict with the child schema's fields
+    assert set(first[0]) == {"clin", "amount"}
+    # a sequence inside the list counts per-parent: 0001, 0002, 0003
+    assert [c["clin"] for c in first] == ["0001", "0002", "0003"]
+
+
+def test_list_type_count_range_and_reproducible():
+    schema = [
+        {
+            "name": "items",
+            "type": "list",
+            "min": 2,
+            "max": 5,
+            "fields": [{"name": "n", "type": "int", "min": 0, "max": 9}],
+        }
+    ]
+    first = generate(schema, rows=4, seed=7)
+    second = generate(schema, rows=4, seed=7)
+    assert first == second  # reproducible, nesting included
+    for row in first:
+        assert 2 <= len(row["items"]) <= 5
+
+
+def test_nested_schema_is_validated():
+    bad = [
+        {
+            "name": "items",
+            "type": "list",
+            "fields": [{"name": "x", "type": "not_a_real_type"}],
+        }
+    ]
+    with pytest.raises(ValueError):
+        generate(bad, rows=1, seed=1)
+
+
 def test_user_can_register_a_custom_type():
     def row_label(field, index, rng, faker):
         return f"ROW-{index}"

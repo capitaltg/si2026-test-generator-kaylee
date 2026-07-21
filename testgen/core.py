@@ -12,7 +12,7 @@ import random
 
 from faker import Faker
 
-from .fields import FIELD_TYPES
+from .fields import FIELD_TYPES, make_record
 
 
 def generate(schema, *, rows=10, seed=None):
@@ -56,22 +56,11 @@ def generate(schema, *, rows=10, seed=None):
     if seed is not None:
         faker.seed_instance(seed)
 
-    result = []
-    for index in range(rows):
-        row = {}
-        for field in schema:
-            # Optional per-field nullability: a field may set "null_pct" (0-100),
-            # the percent of rows that come out NULL. We only draw a random when
-            # null_pct is set, so fields without it consume no randomness and
-            # their output stays byte-identical to before this feature existed.
-            null_pct = field.get("null_pct", 0)
-            if null_pct and rng.random() * 100 < null_pct:
-                row[field["name"]] = None
-            else:
-                make_value = FIELD_TYPES[field["type"]]
-                row[field["name"]] = make_value(field, index, rng, faker)
-        result.append(row)
-    return result
+    # make_record (in fields.py) holds the per-row logic — including optional
+    # per-field null_pct — so a top-level row and a nested child record are built
+    # exactly the same way. Fields without null_pct draw no randomness, so their
+    # output stays byte-identical to before that feature existed.
+    return [make_record(schema, index, rng, faker) for index in range(rows)]
 
 
 def _validate_schema(schema):
@@ -88,3 +77,8 @@ def _validate_schema(schema):
                 f"Unknown field type '{field['type']}' for field "
                 f"'{field['name']}'. Valid types are: {valid}."
             )
+        # A nested field (e.g. a "list" of CLINs) carries a child schema under
+        # "fields"; validate it too so errors surface early, not mid-generation.
+        nested = field.get("fields")
+        if nested:
+            _validate_schema(nested)
