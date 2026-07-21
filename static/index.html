@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fixtura — Test Data Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="logo">{}</div>
+        <div>
+          <div class="brand-name">Fixtura</div>
+          <div class="brand-sub">TEST DATA STUDIO</div>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <label><span class="hint">Table</span>
+        <input id="tableName" value="users" spellcheck="false" style="width:150px" />
+      </label>
+      <div class="spacer"></div>
+      <label><span class="hint">Theme</span>
+        <select id="theme">
+          <option value="Federal Blue">Federal Blue</option>
+          <option value="Slate">Slate</option>
+          <option value="Teal">Teal</option>
+          <option value="Ink">Ink</option>
+          <option value="Custom">Custom…</option>
+        </select>
+      </label>
+      <input id="customColor" type="color" value="#005ea2" title="Custom accent colour"
+             style="width:34px;height:30px;padding:2px;display:none" />
+      <label><span class="hint">Seed</span>
+        <input id="seed" type="number" value="42" style="width:78px" />
+      </label>
+      <button id="generate" class="btn btn-primary">Generate</button>
+    </header>
+
+    <!-- Main: left input, right output -->
+    <main class="main">
+
+      <section class="left">
+        <div class="section-label">DEFINE SCHEMA</div>
+        <div class="tabbar" id="inputTabs"></div>
+        <div class="scroll" id="inputPanel"></div>
+      </section>
+
+      <section class="right">
+        <div class="output-bar">
+          <div class="tabbar" id="outputTabs"></div>
+          <div class="spacer"></div>
+          <div class="rows-ctrl" id="rowsCtrl">
+            <span class="lbl">Rows</span>
+            <button class="preset" data-rows="10">10</button>
+            <button class="preset" data-rows="100">100</button>
+            <button class="preset" data-rows="1000">1k</button>
+            <button class="preset" data-rows="10000">10k</button>
+            <span class="lbl">or</span>
+            <input id="rowCount" value="25" placeholder="custom"
+                   title="Type any number of rows" />
+          </div>
+          <div class="divider" style="background:#e2e6ec;height:24px"></div>
+          <button id="copy" class="btn btn-ghost">Copy</button>
+          <button id="download" class="btn btn-primary">Export</button>
+        </div>
+        <div class="output-body" id="outputBody"></div>
+        <div class="footer">
+          <span><span class="dot"></span><span id="statRows">0 rows</span></span>
+          <span class="sep">·</span>
+          <span class="mono">seed <span id="statSeed">42</span></span>
+          <span class="sep">·</span>
+          <span id="statNote"></span>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

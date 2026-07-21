@@ -45,25 +45,25 @@ def guess_type(raw_name, sql_type=None):
     is checked before ip, so a "zip" column (which contains "ip") stays a zip
     code instead of becoming an IP address.
     """
-    n = str(raw_name).lower()
-    st = str(sql_type or "").lower()
+    name = str(raw_name).lower()
+    sql = str(sql_type or "").lower()
 
     def has(*xs):
-        return any(x in n for x in xs)
+        return any(x in name for x in xs)
 
     if has("email"):
         return "email"
     if has("phone", "mobile", "tel"):
         return "phone"
-    if n in ("uuid", "guid") or "uuid" in st:
+    if name in ("uuid", "guid") or "uuid" in sql:
         return "uuid"
-    if (has("first") and has("name")) or n == "fname":
+    if (has("first") and has("name")) or name == "fname":
         return "firstName"
-    if (has("last") and has("name")) or n in ("lname", "surname"):
+    if (has("last") and has("name")) or name in ("lname", "surname"):
         return "lastName"
     if has("username", "login", "handle"):
         return "username"
-    if has("full_name", "fullname", "display_name") or n == "name":
+    if has("full_name", "fullname", "display_name") or name == "name":
         return "fullName"
     if has("company", "organization", "org", "vendor"):
         return "company"
@@ -81,9 +81,9 @@ def guess_type(raw_name, sql_type=None):
         return "zip"
     if has("country", "nation"):
         return "country"
-    if n == "lat" or has("latitude"):
+    if name == "lat" or has("latitude"):
         return "latitude"
-    if n in ("lng", "lon") or has("longitude"):
+    if name in ("lng", "lon") or has("longitude"):
         return "longitude"
     if has("ip"):
         return "ipv4"
@@ -131,10 +131,10 @@ def guess_type(raw_name, sql_type=None):
         return "time"
     if has("description", "comment", "note", "bio", "summary", "body"):
         return "sentence"
-    if n.endswith("_id") or n == "id":
-        return "uuid" if "uuid" in st else "int"
+    if name.endswith("_id") or name == "id":
+        return "uuid" if "uuid" in sql else "int"
     for pattern, field_type in _SQL_RULES:
-        if re.search(pattern, st):
+        if re.search(pattern, sql):
             return field_type
     return "word"
 

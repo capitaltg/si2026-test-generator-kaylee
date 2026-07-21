@@ -25,9 +25,11 @@ only because pydantic reserves some schema-related names.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from testgen import (
@@ -200,21 +202,12 @@ def schema_from_description(req: DescribeRequest) -> dict:
     return {"fields": from_description(req.text)}
 
 
-@app.get("/")
-def root() -> dict:
-    """A tiny landing response until the Fixtura front end is served here (P4)."""
-    return {
-        "name": "Fixtura API",
-        "endpoints": [
-            "GET /field-types",
-            "POST /generate",
-            "POST /export",
-            "POST /schema/from-ddl",
-            "POST /schema/from-csv",
-            "POST /schema/from-json",
-            "POST /schema/from-description",
-        ],
-    }
+# Serve the Fixtura front end (static files) at the root. Mounted LAST so the
+# API routes defined above are matched first; anything else (/, /styles.css,
+# /app.js) is served from the static/ folder. html=True serves index.html at /.
+_STATIC_DIR = Path(__file__).parent / "static"
+if _STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")
 
 
 if __name__ == "__main__":
