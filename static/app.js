@@ -220,7 +220,11 @@ function renderInputPanel() {
 }
 
 function renderOutputTabs() {
-  const tabs = ["table", "json", "csv", "sql", "pdf"];
+  // A data preset is a real dataset, so it gets the same text-format tabs the
+  // builder does (minus PDF). A form/doc preset renders a fixed PDF, so it has
+  // no tabs at all.
+  const isData = state.preset && state.presetKind === "data";
+  const tabs = isData ? ["table", "json", "csv", "sql"] : ["table", "json", "csv", "sql", "pdf"];
   $("#outputTabs").innerHTML = tabs
     .map(
       (t) =>
@@ -231,9 +235,9 @@ function renderOutputTabs() {
   // Table/Doc toggle only makes sense while PDF is selected, and Copy makes no
   // sense for a binary file, so show each contextually.
   const isPdf = state.outputTab === "pdf";
-  // In template mode the tabs/toggle don't apply — the preset drives output.
+  // Only a form/doc preset (fixed PDF) hides the tabs; a data preset keeps them.
   const tplForm = state.preset && state.presetKind !== "data";
-  $("#outputTabs").style.display = state.preset ? "none" : "";
+  $("#outputTabs").style.display = tplForm ? "none" : "";
   $("#pdfCtrl").style.display = !state.preset && isPdf ? "" : "none";
   $("#copy").style.display = tplForm || isPdf ? "none" : "";
   renderRowsCtrl();
@@ -272,7 +276,11 @@ function cellHtml(value) {
 
 function tableHtml() {
   if (!state.rows.length) return `<div class="placeholder">No rows yet.</div>`;
-  const cols = state.fields.map((f) => ({ name: f.name, label: state.labels[f.type] || f.type }));
+  // A preset's columns come from the generated records; the builder's come from
+  // the configured field list.
+  const cols = state.preset
+    ? Object.keys(state.rows[0]).map((n) => ({ name: n, label: n }))
+    : state.fields.map((f) => ({ name: f.name, label: state.labels[f.type] || f.type }));
   const head =
     `<th class="num">#</th>` +
     cols
@@ -285,7 +293,7 @@ function tableHtml() {
     .map(
       (row, i) =>
         `<tr><td class="num">${i + 1}</td>` +
-        state.fields.map((f) => cellHtml(row[f.name])).join("") +
+        cols.map((c) => cellHtml(row[c.name])).join("") +
         `</tr>`
     )
     .join("");
@@ -308,13 +316,11 @@ function codeHtml(text) {
 
 async function exportText(format) {
   if (state.exportCache[format] != null) return state.exportCache[format];
-  const resp = await postJSON("/export", {
-    fields: buildFields(),
-    rows: Math.min(state.rowCount, PREVIEW_CAP),
-    seed: state.seed,
-    format,
-    table: state.tableName,
-  });
+  // A data preset exports its records; the builder exports its field schema.
+  const body = state.preset
+    ? { preset: state.preset, rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.preset }
+    : { fields: buildFields(), rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.tableName };
+  const resp = await postJSON("/export", body);
   const text = await resp.text();
   state.exportCache[format] = text;
   return text;
@@ -455,8 +461,9 @@ async function loadPdfPreview() {
 async function renderOutput() {
   const body = $("#outputBody");
   const tab = state.outputTab;
-  // In template mode the output is driven entirely by the preset, not the tabs.
-  if (state.preset) return generatePreset(Number(state.rowCount) || 0);
+  // A form/doc preset is driven entirely by the preset (a fixed PDF). The
+  // builder and data presets are tab-driven and share the rendering below.
+  if (state.preset && state.presetKind !== "data") return generatePreset(Number(state.rowCount) || 0);
   if (tab === "table") {
     body.innerHTML = tableHtml();
   } else if (tab === "json") {
@@ -501,6 +508,8 @@ function selectPreset(key) {
     state.presetKind = p.kind;
     // Forms are heavy (one filled form per row); default to a sensible few.
     if (p.kind === "form" && Number(state.rowCount) > 10) state.rowCount = 3;
+    // A data preset has no PDF tab; if PDF was active, fall back to the table.
+    if (p.kind === "data" && state.outputTab === "pdf") state.outputTab = "table";
   }
   renderInputPanel();
   renderOutputTabs();
@@ -511,19 +520,21 @@ async function generate() {
   state.exportCache = {}; // fresh generation invalidates cached exports
   const total = Number(state.rowCount) || 0;
   $("#statSeed").textContent = state.seed;
-  if (state.preset) return generatePreset(total);
+  // A form/doc preset renders a fixed PDF preview. The builder and data presets
+  // both produce rows we render through the format tabs.
+  if (state.preset && state.presetKind !== "data") return generatePreset(total);
   try {
-    const resp = await postJSON("/generate", {
-      fields: buildFields(),
-      rows: Math.min(total, PREVIEW_CAP),
-      seed: state.seed,
-    });
+    const body = state.preset
+      ? presetReqBody(Math.min(total, PREVIEW_CAP))
+      : { fields: buildFields(), rows: Math.min(total, PREVIEW_CAP), seed: state.seed };
+    const resp = await postJSON("/generate", body);
     state.rows = (await resp.json()).rows;
   } catch (e) {
     state.rows = [];
     toast("Could not generate: " + e.message);
   }
-  $("#statRows").textContent = total.toLocaleString() + " rows";
+  $("#statRows").textContent =
+    total.toLocaleString() + (state.preset ? " records" : " rows");
   $("#statNote").textContent =
     total > PREVIEW_CAP
       ? `Showing first ${PREVIEW_CAP} of ${total.toLocaleString()} — export for the full set`
@@ -531,41 +542,29 @@ async function generate() {
   renderOutput();
 }
 
-// Preset mode generation. A form preset renders as a filled-form PDF preview;
-// a data preset renders its nested records as JSON (the natural shape here).
+// Form/doc preset preview: render a filled-form PDF, one copy per record. (Data
+// presets don't come here — they render through the format tabs like the builder.)
 async function generatePreset(total) {
   const body = $("#outputBody");
-  const isPdfPreset = state.presetKind !== "data";
-  $("#statRows").textContent = total.toLocaleString() + (isPdfPreset ? " docs" : " records");
+  $("#statRows").textContent = total.toLocaleString() + " docs";
   $("#statNote").textContent = "";
-  if (isPdfPreset) {
-    body.innerHTML =
-      `<div class="pdf-pane"><div class="pdf-controls"><div class="pdf-hint">` +
-      `Filled real form — one copy per record, each with generated, reconciling data. ` +
-      `Change the seed to re-roll; click Export to download.</div></div>` +
-      `<div class="pdf-preview"><iframe id="pdfFrame" title="Form preview"></iframe>` +
-      `<div class="pdf-preview-note" id="pdfNote">Building preview…</div></div></div>`;
-    try {
-      const resp = await postJSON("/export", presetReqBody(Math.min(total, 5)));
-      const blob = await resp.blob();
-      if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
-      lastPdfUrl = URL.createObjectURL(blob);
-      $("#pdfFrame").src = lastPdfUrl + "#toolbar=0&navpanes=0&view=FitH";
-      const note = $("#pdfNote");
-      if (note) note.textContent = total > 5 ? `Preview · first 5 of ${total} forms · Export for all` : `Preview · ${total} form${total === 1 ? "" : "s"}`;
-    } catch (e) {
-      const note = $("#pdfNote");
-      if (note) note.textContent = "Preview error: " + e.message;
-    }
-    return;
-  }
-  // data preset -> JSON records
+  body.innerHTML =
+    `<div class="pdf-pane"><div class="pdf-controls"><div class="pdf-hint">` +
+    `Filled real form — one copy per record, each with generated, reconciling data. ` +
+    `Change the seed to re-roll; click Export to download.</div></div>` +
+    `<div class="pdf-preview"><iframe id="pdfFrame" title="Form preview"></iframe>` +
+    `<div class="pdf-preview-note" id="pdfNote">Building preview…</div></div></div>`;
   try {
-    const resp = await postJSON("/generate", presetReqBody(Math.min(total, PREVIEW_CAP)));
-    state.rows = (await resp.json()).rows;
-    body.innerHTML = codeHtml(JSON.stringify(state.rows, null, 2));
+    const resp = await postJSON("/export", presetReqBody(Math.min(total, 5)));
+    const blob = await resp.blob();
+    if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
+    lastPdfUrl = URL.createObjectURL(blob);
+    $("#pdfFrame").src = lastPdfUrl + "#toolbar=0&navpanes=0&view=FitH";
+    const note = $("#pdfNote");
+    if (note) note.textContent = total > 5 ? `Preview · first 5 of ${total} forms · Export for all` : `Preview · ${total} form${total === 1 ? "" : "s"}`;
   } catch (e) {
-    body.innerHTML = `<div class="placeholder">Error: ${escapeHtml(e.message)}</div>`;
+    const note = $("#pdfNote");
+    if (note) note.textContent = "Preview error: " + e.message;
   }
 }
 
@@ -626,7 +625,25 @@ async function download() {
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
         toast("Downloaded " + a.download);
       } else {
-        await saveExport("json", "json", { preset: state.preset });
+        // Data preset: export in the active tab's format (Table downloads CSV).
+        const fmt = state.outputTab === "table" ? "csv" : state.outputTab;
+        const ext = { csv: "csv", json: "json", sql: "sql" }[fmt] || fmt;
+        const resp = await postJSON("/export", {
+          preset: state.preset,
+          rows: Math.min(Number(state.rowCount) || 0, 50000),
+          seed: state.seed,
+          format: fmt,
+          table: state.preset,
+        });
+        const blob = await resp.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = state.preset + "." + ext;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        toast("Downloaded " + a.download);
       }
     } catch (e) {
       toast("Export failed: " + e.message);

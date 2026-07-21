@@ -132,6 +132,40 @@ _CDRLS = [
     "A003 - Quarterly Progress Review",
 ]
 
+# Services NAICS codes with their 2026 SBA size standard (receipts-based unless
+# noted). Used to fill SF-1449 block 5a/5b — the boxes a reviewer expects on any
+# commercial-items acquisition.
+_NAICS = [
+    ("541511", "Custom Computer Programming Services", "$34.0M"),
+    ("541512", "Computer Systems Design Services", "$34.0M"),
+    ("541519", "Other Computer Related Services", "$34.0M"),
+    ("541330", "Engineering Services", "$25.5M"),
+    ("541611", "Administrative Management and General Management Consulting", "$24.5M"),
+    (
+        "541712",
+        "Research and Development in the Physical, Engineering and Life Sciences",
+        "1,000 employees",
+    ),
+    ("561210", "Facilities Support Services", "$47.0M"),
+]
+
+# Set-aside category and the SF-1449 block-10 checkbox(es) it lights up. The
+# on-state for every one of these boxes is "/1". "Unrestricted" checks the lone
+# unrestricted box; every set-aside checks the SET ASIDE box plus its category.
+_SET_ASIDES = [
+    ("Unrestricted", ["UNRESTRICTIONTED[0]"]),
+    ("Small Business", ["SETASIDE[0]", "SMALLBUSINESS[2]"]),
+    ("8(a)", ["SETASIDE[0]", "ACHECKBOX[0]"]),
+    (
+        "Service-Disabled Veteran-Owned Small Business",
+        ["SETASIDE[0]", "SERVICEDISABLED[0]"],
+    ),
+    ("Women-Owned Small Business", ["SETASIDE[0]", "SMALLBUSINESS[1]"]),
+    ("HUBZone Small Business", ["SETASIDE[0]", "HUBZONESMALL[0]"]),
+]
+# Favor unrestricted / small-business; the niche categories are less common.
+_SET_ASIDE_WEIGHTS = [4, 4, 1, 1, 1, 1]
+
 
 # --- Small helpers ------------------------------------------------------------
 
@@ -196,9 +230,30 @@ def build_contract(rng, faker, index, opts=None):
         "uei": _uei(rng),
         "cage": _alnum(rng, 5),
         "address": faker.address().replace("\n", ", "),
+        "phone": faker.numerify("(###) ###-####"),
     }
     contract_type = rng.choice(["T&M", "CPFF", "FFP", "IDIQ"])
+
+    # Acquisition metadata a real award records: the NAICS + size standard the
+    # buy was solicited under, the set-aside, and the pre-award solicitation
+    # milestones (issued, then offers due, then award — strictly in that order).
+    naics = rng.choice(_NAICS)
+    set_aside = rng.choices(_SET_ASIDES, weights=_SET_ASIDE_WEIGHTS)[0][0]
+    solicitation_issue = effective - datetime.timedelta(days=rng.randint(45, 90))
+    offer_due = effective - datetime.timedelta(days=rng.randint(10, 30))
     labor_type = "FFP" if contract_type == "FFP" else rng.choice(["T&M", "CPFF"])
+
+    # Office DoDAAC-style codes (the CODE boxes beside "issued by" / "administered
+    # by") and the finance identifiers a processed/paid award record carries.
+    issuing_office_code = _alnum(rng, 6)
+    admin_office_code = _alnum(rng, 6)
+    payment = {
+        "paying_office": "Defense Finance and Accounting Service (DFAS)",
+        "voucher_no": faker.bothify(text="PV-########"),
+        "check_no": faker.numerify("##########"),
+        "sr_account_no": faker.bothify(text="SR-####-#####"),
+        "disbursing_officer": faker.name(),
+    }
 
     # Periods: 1 base year + N option years, contiguous (invariant 6).
     option_years = int(opts.get("option_years", rng.randint(1, 4)))
@@ -223,8 +278,18 @@ def build_contract(rng, faker, index, opts=None):
             text=agency["piid"].split("{fy}")[0] + "####R"
         ),
         "effective_date": effective,
+        "solicitation_issue_date": solicitation_issue,
+        "offer_due_date": offer_due,
+        "naics_code": naics[0],
+        "naics_title": naics[1],
+        "size_standard": naics[2],
+        "set_aside": set_aside,
+        "discount_terms": rng.choice(["Net 30", "Net 30", "1% 10, Net 30", "Net 15"]),
         "agency": agency["name"],
         "issuing_office": agency["office"],
+        "issuing_office_code": issuing_office_code,
+        "admin_office_code": admin_office_code,
+        "payment": payment,
         "contractor": contractor,
         "contracting_officer": faker.name(),
         "co_phone": faker.numerify("(###) ###-####"),
@@ -494,30 +559,54 @@ def _fmt_date(d):
     return d.strftime("%Y-%m-%d") if isinstance(d, datetime.date) else str(d)
 
 
+def _setaside_boxes(set_aside):
+    """The SF-1449 block-10 checkbox field(s) to switch on for a set-aside label,
+    each set to its "/1" on-state. Falls back to unrestricted if unrecognized."""
+    for label, boxes in _SET_ASIDES:
+        if label == set_aside:
+            return {_P + b: "/1" for b in boxes}
+    return {_P + "UNRESTRICTIONTED[0]": "/1"}
+
+
 def contract_to_sf1449(contract):
     """Map a contract onto the real SF-1449 (commercial award). The base-year
     CLINs go into the line-item grid (rows 1-8); header blocks carry the PIID,
     solicitation, agency and contractor."""
     c = contract
     contractor = c["contractor"]
+    pay = c["payment"]
+    base_value = _fmt_money(c["periods"][0]["ceiling"] if c["periods"] else 0.0)
     values = {
+        # --- Header: identifiers, dates, offices (blocks 1-9, 15-18). ---
         _P + "reqnumber[0]": c["solicitation_no"],
         _P + "contractno[0]": c["piid"],
         _P + "solicitationnumber[0]": c["solicitation_no"],
+        # Block 9 issued-by: the short office code, then the full name/address.
         _P + "issuedbycode[0]": c["issuing_office"],
+        _P + "TextField1[4]": f"{c['agency']}\n{c['issuing_office']}",
         _P + "AdministeredBy[0]": c["agency"],
         # 17a code box is narrow; the 5-char CAGE fits, full UEI/CAGE go in 17a's
-        # address block below it.
+        # address block below it, with the contractor telephone in 17b.
         _P + "contractorcode[0]": contractor["cage"],
         _P + "contractoraddress[0]": f"{contractor['name']}\n{contractor['address']}\n"
         f"UEI {contractor['uei']}  CAGE {contractor['cage']}",
+        _P + "TextField1[1]": contractor["phone"],
         _P + "paymentbyaddress[0]": c["issuing_office"],
         _P + "pagenumber[0]": "1",
-        # Dates, contact, accounting, and the total-award block.
+        # Block 3 award/effective, plus the pre-award solicitation milestones
+        # (block 6 issued, block 8 offers due) that necessarily precede it.
         _P + "AWARDDate[0]": _fmt_date(c["effective_date"]),
+        _P + "Date[3]": _fmt_date(c["solicitation_issue_date"]),  # 6. issue date
+        _P + "Date[4]": _fmt_date(c["offer_due_date"]),  # 8. offer due date
+        _P + "TextField1[2]": "2:00 PM local time",  # 8. offer due local time
         _P + "contactname[0]": c["contracting_officer"],
         _P + "contactphone[0]": c["co_phone"],
         _P + "DeliverTo[0]": c["issuing_office"],
+        # Block 5a/5b: the NAICS the buy was solicited under and its size standard.
+        _P + "NAICS[0]": c["naics_code"],
+        _P + "SIZESTANDARDS[0]": c["size_standard"],
+        # Block 12: prompt-payment discount terms.
+        _P + "discountterms[0]": c["discount_terms"],
         _P
         + "accountingdata[0]": (
             f"Appropriation FY{c['effective_date'].year % 100:02d}; "
@@ -525,20 +614,22 @@ def contract_to_sf1449(contract):
             f"{_fmt_money(c['total_ceiling'])} ceiling."
         ),
         # Block 26 total award = the awarded (base-year) value.
-        _P
-        + "TOTALAWARD[0]": _fmt_money(
-            c["periods"][0]["ceiling"] if c["periods"] else 0.0
-        ),
-        # --- Finalized award: both parties signed (blocks 30-31). ---
+        _P + "TOTALAWARD[0]": base_value,
+        # Block 14 method of solicitation: commercial items are bought by RFQ.
+        _P + "RFQ[0]": "/1",
+        # Block 27b: this contract incorporates FAR 52.212-4 by reference; no
+        # addenda attached. Block 28: contractor is required to sign and return.
+        _P + "CheckBox1[1]": "/1",
+        _P + "arenot2[0]": "/1",
+        _P + "CheckBox1[2]": "/1",
+        # --- Finalized bilateral award: both parties signed (blocks 30-31). ---
         _P + "signername[0]": f"{contractor['name']} / Authorized Signatory",
         _P + "signertitle[0]": c["signer_title"],
-        _P + "offerreference[0]": c["solicitation_no"],
-        _P + "Date[3]": _fmt_date(c["effective_date"]),  # contractor signed
-        _P + "Date[4]": _fmt_date(c["effective_date"]),  # CO signed / awarded
-        # --- Page 2: government acceptance (this is a delivered, accepted
-        # contract record). Finance-processing blocks (voucher, amount verified,
-        # check number, certifying officer) are intentionally left blank; those
-        # belong to a payment record, not an award. ---
+        _P + "Date[1]": _fmt_date(c["effective_date"]),  # 30c. contractor signed
+        _P + "contractingofficer[0]": c["contracting_officer"],  # 31b. CO name
+        _P + "Date[2]": _fmt_date(c["effective_date"]),  # 31c. CO signed
+        # --- Page 2: government acceptance + payment (a delivered, accepted and
+        # paid contract record — blocks 32-42). ---
         "topmostSubform[0].Page2[0].authorizedname[0]": c["gov_representative"],
         "topmostSubform[0].Page2[0].authorizedtitle[0]": "Contracting Officer's Representative (COR)",
         "topmostSubform[0].Page2[0].authorizedaddress[0]": c["gov_rep_address"],
@@ -555,7 +646,22 @@ def contract_to_sf1449(contract):
         "topmostSubform[0].Page2[0].CDATE[0]": _fmt_date(c["acceptance_date"]),
         "topmostSubform[0].Page2[0].DateCDATE[0]": _fmt_date(c["acceptance_date"]),
         "topmostSubform[0].Page2[0].Date[0]": _fmt_date(c["acceptance_date"]),
+        # Payment-processing blocks 34-41: a voucher was cut, verified against the
+        # award, charged to a stores/stock-record account, and paid by DFAS.
+        "topmostSubform[0].Page2[0].vouchernumber[0]": pay["voucher_no"],  # 34
+        "topmostSubform[0].Page2[0].amountverified[0]": base_value,  # 35
+        "topmostSubform[0].Page2[0].checknumber[0]": pay["check_no"],  # 37
+        "topmostSubform[0].Page2[0].SRAccountNo[0]": pay["sr_account_no"],  # 38
+        "topmostSubform[0].Page2[0].SRVoucherNo[0]": pay["voucher_no"],  # 39
+        "topmostSubform[0].Page2[0].PaidBy[0]": pay["paying_office"],  # 40
+        "topmostSubform[0].Page2[0].TitleCertifyOfficer[0]": "Authorized Certifying Officer",  # 41b
     }
+
+    # Block 10 set-aside: light up the matching checkbox(es), and — when it is a
+    # set-aside rather than unrestricted — the 100% set-aside percentage.
+    values.update(_setaside_boxes(c["set_aside"]))
+    if c["set_aside"] != "Unrestricted":
+        values[_P + "setasidepercent[0]"] = "100"
 
     # Base-year CLINs into the numbered line-item grid.
     base = c["periods"][0]["clins"] if c["periods"] else []
@@ -578,15 +684,8 @@ def contract_to_sf30(contract):
     history = c["obligation_history"]
     mod = next((m for m in reversed(history) if m["mod"] != "Award"), history[-1])
     prev_cumulative = _round_money(mod["cumulative_obligated"] - mod["amount"])
+    mod_date = _fmt_date(mod["date"])
 
-    description = (
-        "The purpose of this modification is to obligate incremental funding. "
-        "Accordingly: (a) Total funds obligated on this contract are increased "
-        f"by {_fmt_money(mod['amount'])}, from {_fmt_money(prev_cumulative)} to "
-        f"{_fmt_money(mod['cumulative_obligated'])}. (b) The total contract "
-        f"ceiling remains {_fmt_money(c['total_ceiling'])}. (c) All other terms "
-        "and conditions remain unchanged and in full force and effect."
-    )
     accounting = (
         f"Appropriation FY{c['effective_date'].year % 100:02d}; "
         f"Obligated this action {_fmt_money(mod['amount'])}."
@@ -597,34 +696,74 @@ def contract_to_sf30(contract):
     id_code = {"IDIQ": "D", "FFP": "C", "T&M": "C", "CPFF": "C"}.get(
         c["contract_type"], "C"
     )
-    return {
+
+    values = {
         # Block 2 = the amendment/modification number (this action).
         _P + "AmendmentNo[0]": mod["mod"],
-        # Block 10A = the CONTRACT/ORDER number being modified (the PIID).
+        # Block 10A = the CONTRACT/ORDER number being modified (the PIID); its
+        # checkbox marks that this action modifies a contract (not item 9's
+        # solicitation), and 10B carries the original contract's effective date.
+        # (Item 9's amendment-of-solicitation boxes stay blank on purpose — a
+        # single SF-30 is EITHER a solicitation amendment OR a contract mod.)
         _P + "ModificationNo[0]": c["piid"],
-        _P + "EffectiveDate[0]": _fmt_date(mod["date"]),
+        _P + "CheckBox10[0]": "/1",
+        _P + "Dated10B[0]": _fmt_date(c["effective_date"]),
+        _P + "EffectiveDate[0]": mod_date,
         _P + "ContractIDCode[0]": id_code,
         _P + "ReqNumber[0]": c["solicitation_no"],
+        # Blocks 6/7/8: offices with their DoDAAC-style CODE boxes, contractor
+        # with its CAGE (CODE) and facility code.
         _P + "IssuedBy[0]": f"{c['agency']}\n{c['issuing_office']}",
+        _P + "Code[0]": c["issuing_office_code"],
         _P + "AdministeredBy[0]": c["issuing_office"],
+        _P + "Code[2]": c["admin_office_code"],
         _P + "NameandAddress[0]": f"{contractor['name']}\n{contractor['address']}\n"
         f"UEI {contractor['uei']}  CAGE {contractor['cage']}",
+        _P + "Code[1]": contractor["cage"],
+        _P + "FacilityCode[0]": contractor["cage"],
         _P + "AccountingData[0]": accounting,
-        _P + "Description[0]": description,
-        # Item 13: an incremental-funding action is a unilateral change order
-        # issued pursuant to a clause authority (13A), so the contractor is NOT
-        # required to sign (item 16). Solicitation-amendment boxes (item 11)
-        # stay off — this modifies a contract, not a solicitation.
-        _P + "CheckBox13A[0]": "/1",
-        _P + "A13[0]": "FAR 52.232-22, Limitation of Funds",
-        _P + "IsNot[0]": "/1",
         _P
         + "NameandTitleSigner[0]": f"{contractor['name']} (Authorized Representative)",
         _P
         + "NameandTitleOfficer[0]": f"{c['contracting_officer']}, Contracting Officer",
+        # 16C: the Contracting Officer's signature date (always present).
+        _P + "DateSigned[1]": mod_date,
         _P + "Page[0]": "1",
         _P + "Pages[0]": "1",
     }
+
+    # An option exercise is a BILATERAL supplemental agreement (13C): both parties
+    # sign (blocks 15C + 16C) and the contractor returns copies. An incremental-
+    # funding or administrative action is a UNILATERAL change order (13A) that the
+    # CO alone executes — the contractor is not required to sign (13E).
+    if "option" in mod["action"].lower():
+        values[_P + "CheckBox13C[0]"] = "/1"
+        values[_P + "C13[0]"] = "Mutual agreement of the parties (FAR 43.103(a))"
+        values[_P + "Is[0]"] = "/1"
+        values[_P + "DateSigned[0]"] = mod_date  # 15C contractor signed
+        values[_P + "Copies[0]"] = "3"
+        values[_P + "CopiesReturned[0]"] = "3"
+        values[_P + "Description[0]"] = (
+            f"The purpose of this modification is to exercise {mod['action'].lower()} "
+            "in accordance with FAR 52.217-9. Accordingly: (a) The Government "
+            f"exercises the option, obligating {_fmt_money(mod['amount'])} "
+            f"(cumulative obligated {_fmt_money(mod['cumulative_obligated'])}). "
+            f"(b) The total contract ceiling remains {_fmt_money(c['total_ceiling'])}. "
+            "(c) All other terms and conditions remain unchanged."
+        )
+    else:
+        values[_P + "CheckBox13A[0]"] = "/1"
+        values[_P + "A13[0]"] = "FAR 52.232-22, Limitation of Funds"
+        values[_P + "IsNot[0]"] = "/1"
+        values[_P + "Description[0]"] = (
+            "The purpose of this modification is to obligate incremental funding. "
+            "Accordingly: (a) Total funds obligated on this contract are increased "
+            f"by {_fmt_money(mod['amount'])}, from {_fmt_money(prev_cumulative)} to "
+            f"{_fmt_money(mod['cumulative_obligated'])}. (b) The total contract "
+            f"ceiling remains {_fmt_money(c['total_ceiling'])}. (c) All other terms "
+            "and conditions remain unchanged and in full force and effect."
+        )
+    return values
 
 
 # --- Drawn-document presets (no official form exists) -------------------------
@@ -634,12 +773,26 @@ def contract_to_sf30(contract):
 # column order and a `config` describing the drawn layout.
 
 
+def _pop(c):
+    """The overall period of performance: base-year start through the last
+    period's end (i.e. inclusive of all option years), as 'start to end'."""
+    periods = c["periods"]
+    if not periods:
+        return ""
+    return (
+        f"{_fmt_date(periods[0]['pop_start'])} to {_fmt_date(periods[-1]['pop_end'])}"
+    )
+
+
 def _funding_summary_row(rng, faker, index, opts=None):
     c = build_contract(rng, faker, index, opts)
     return {
         "contract_no": c["piid"],
         "contractor": c["contractor"]["name"],
         "agency": c["agency"],
+        "contract_type": c["contract_type"],
+        "pop": _pop(c),
+        "contracting_officer": c["contracting_officer"],
         "total_ceiling": _fmt_money(c["total_ceiling"]),
         "total_obligated": _fmt_money(c["total_obligated"]),
         "unfunded_balance": _fmt_money(c["unfunded_balance"]),
@@ -679,6 +832,8 @@ def _record_sheet_row(rng, faker, index, opts=None):
         "agency": c["agency"],
         "contract_type": c["contract_type"],
         "award_date": _fmt_date(c["effective_date"]),
+        "pop": _pop(c),
+        "contracting_officer": c["contracting_officer"],
         "total_ceiling": _fmt_money(c["total_ceiling"]),
         "total_obligated": _fmt_money(c["total_obligated"]),
     }
@@ -707,11 +862,18 @@ def _invoice_row(rng, faker, index, opts=None):
     return {
         "invoice_no": faker.bothify(text="INV-####-#####"),
         "invoice_date": _fmt_date(inv_date),
+        # A voucher schedule number the disbursing office assigns to the invoice.
+        "schedule_no": faker.bothify(text="SCH-######"),
         "contract_no": c["piid"],
         "contractor": c["contractor"]["name"],
+        "uei": c["contractor"]["uei"],
         "remit_to": c["contractor"]["address"],
         "agency": c["agency"],
         "contracting_officer": c["contracting_officer"],
+        "accounting": f"Appropriation FY{inv_date.year % 100:02d}; {c['piid']}",
+        "paying_office": c["payment"]["paying_office"],
+        "check_no": c["payment"]["check_no"],
+        "disbursing_officer": c["payment"]["disbursing_officer"],
         "amount_due": _fmt_money(billed),
         "line_items": lines,
     }
@@ -733,20 +895,50 @@ def invoice_to_sf1034(row):
     invoice date as the service date); the total fills the voucher total."""
     values = {
         _P + "VoucherNumber[0]": row["invoice_no"],
+        _P + "ScheduleNumber[0]": row["schedule_no"],
         _P + "DateVoucherPrepared[0]": row["invoice_date"],
+        _P + "DateInvoiceReceived[0]": row["invoice_date"],
         _P + "ContractNoandDate[0]": row["contract_no"],
         _P + "USDepartmentLocation[0]": row["agency"],
         _P + "PayeeNameAddress[0]": f"{row['contractor']}\n{row['remit_to']}",
+        # Payee account = the contractor's UEI (how the payee is keyed in SAM).
+        _P + "PayeeAccountNo[0]": f"UEI {row['uei']}",
+        _P + "AccountingClassification[0]": row["accounting"],
         _P + "TotalAmount[0]": row["amount_due"],
         _P + "AmountVerified[0]": row["amount_due"],
-        _P + "Title[0]": f"{row['contracting_officer']}, Contracting Officer",
+        # Bottom "APPROVED FOR $" line (both the label box and the amount box).
+        _P + "approved[0]": row["amount_due"],
+        _P + "ApprovedFor[0]": row["amount_due"],
+        # An interim monthly voucher against an ongoing contract is a PARTIAL,
+        # PROGRESS payment (neither complete nor final).
+        _P + "Partial[0]": "/1",
+        _P + "Progress[0]": "/1",
+        # "Pursuant to the authority vested in me, I certify this voucher is
+        # correct and proper for payment" — the certifying-officer block. (The
+        # signature boxes are /Sig fields and can't hold text, so only the
+        # printed name/title/date are filled.)
+        _P + "By2[0]": row["contracting_officer"],
+        _P + "Title[1]": "Contracting Officer",
+        _P + "DateofCertify[0]": row["invoice_date"],
+        _P + "Title[2]": "Authorized Certifying Officer",
+        # Disbursing block: paid by Treasury check to the payee.
+        _P + "ScheduleNumber[1]": row["paying_office"],  # "Paid By"
+        _P + "CheckNo[0]": row["check_no"],
+        _P + "TreasurerofUS[0]": "Treasurer of the United States",
+        _P + "Date1[0]": row["invoice_date"],
+        _P + "Payee3[0]": row["contractor"],
+        _P + "For[0]": row["disbursing_officer"],
+        _P + "Title[0]": "Disbursing Officer",
     }
     for i, li in enumerate(row["line_items"][:9]):
         values[_P + f"ArticlesServices[{i}]"] = _short_desc(li["description"])
         values[_P + f"NumberDateofOrder[{i}]"] = li["clin"]
         values[_P + f"DateofDelivery[{i}]"] = row["invoice_date"]
+        # Quantity 1 at a lot-price unit cost, so unit price (Cost) == amount.
+        values[_P + f"Cost{i + 1}[0]"] = li["amount_billed"]
         values[_P + f"Amount{i + 1}[0]"] = li["amount_billed"]
         values[_P + f"Quantity{i + 1}[0]"] = "1"
+        values[_P + f"Per[{i}]"] = "LO"
     return values
 
 
@@ -769,6 +961,23 @@ def funding_summary_blocks(r):
             "name": "contractor",
             "label": "Contractor",
             "value": r["contractor"],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("contract_type", "Contract Type", r["contract_type"]),
+                (
+                    "contracting_officer",
+                    "Contracting Officer",
+                    r["contracting_officer"],
+                ),
+            ],
+        },
+        {
+            "type": "field",
+            "name": "pop",
+            "label": "Period of Performance",
+            "value": r["pop"],
         },
         {
             "type": "pair",
@@ -826,14 +1035,25 @@ def record_sheet_blocks(r):
             "type": "pair",
             "fields": [
                 ("award_date", "Award Date", r["award_date"]),
-                ("total_ceiling", "Total Ceiling", r["total_ceiling"]),
+                (
+                    "contracting_officer",
+                    "Contracting Officer",
+                    r["contracting_officer"],
+                ),
             ],
         },
         {
             "type": "field",
-            "name": "total_obligated",
-            "label": "Total Obligated",
-            "value": r["total_obligated"],
+            "name": "pop",
+            "label": "Period of Performance",
+            "value": r["pop"],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("total_ceiling", "Total Ceiling", r["total_ceiling"]),
+                ("total_obligated", "Total Obligated", r["total_obligated"]),
+            ],
         },
     ]
 
@@ -883,6 +1103,175 @@ def award_letter_blocks(r):
             "height": 430,
         },
     ]
+
+
+# --- Flat CSV dataset presets (ERP-style labor exports) -----------------------
+# These are the "data" kind: each build() returns one flat, uniform-keyed record,
+# and the generic writers serialize the batch to CSV / SQL / JSON. They reuse the
+# same _LCATS reference data as the contracts/invoices, so a given labor category
+# bills a consistent, realistic loaded rate everywhere it appears. They model the
+# tabular exports a GovCon ERP (Unanet / Deltek Costpoint) produces — the system
+# of record where labor categories, bill rates, hours and charge codes actually
+# live — rather than any government form.
+
+
+def _loaded_rate(rng, spec):
+    """A fully-burdened (loaded) bill rate for an LCAT: a rate inside the LCAT's
+    band plus its clearance premium. Same buildup as the contract labor lines."""
+    lo, hi = spec["band"]
+    base_loaded = round(rng.uniform(lo, hi), 2)
+    prem_lo, prem_hi = _CLEARANCE_PREMIUM[spec["clr"]]
+    premium = round(rng.uniform(prem_lo, prem_hi), 2) if prem_hi else 0.0
+    return round(base_loaded + premium, 2)
+
+
+def _employee(faker):
+    """A (name, employee-id) pair for a labor line."""
+    return faker.name(), faker.bothify(text="E-#####")
+
+
+def _charge_ref(rng, faker):
+    """A plausible contract number (PIID) and a base-year labor CLIN to charge
+    time against — the charge code an employee books hours to."""
+    agency = _pick_agency(rng, None)
+    piid = _piid(rng, faker, agency, _effective_date(rng))
+    return piid, f"000{rng.randint(1, 4)}"
+
+
+def _recent_month(rng):
+    """A YYYY-MM within roughly the last year (an accounting period)."""
+    today = datetime.date.today()
+    year, month = today.year, today.month - rng.randint(0, 11)
+    while month < 1:
+        month += 12
+        year -= 1
+    return f"{year:04d}-{month:02d}"
+
+
+def _recent_week_ending(rng):
+    """A recent Friday (a weekly timesheet's week-ending date)."""
+    day = datetime.date.today() - datetime.timedelta(weeks=rng.randint(0, 25))
+    return _fmt_date(day - datetime.timedelta(days=(day.weekday() - 4) % 7))
+
+
+def build_scenario(seed, opts=None):
+    """A seed-stable 'scenario' the labor exports share: one contract plus a
+    billing roster mapped to its base-year labor CLINs.
+
+    The contract is built exactly the way the award preset builds its FIRST row
+    (a fresh Random(seed) + seeded Faker at index 0), so for a given seed the
+    Contract Award, the Timesheet and the Labor Distribution Export all reference
+    the SAME contract number, the SAME CLINs, and (for the two exports) the SAME
+    people at the SAME rates — so the generated set analyzes as one coherent
+    contract. Consistency holds only when a seed is set (None => not reproducible).
+    """
+    import random
+
+    rng = random.Random(seed)
+    faker = Faker()
+    if seed is not None:
+        faker.seed_instance(seed)
+    contract = build_contract(rng, faker, 0, opts)
+
+    # One roster entry per labor line on each base-year labor CLIN: a named person
+    # tied to that CLIN, their LCAT, and the CLIN's actual loaded bill rate.
+    roster = []
+    base = contract["periods"][0]["clins"] if contract["periods"] else []
+    for clin in base:
+        for line in clin.get("labor_rates", []):
+            name, emp_id = _employee(faker)
+            roster.append(
+                {
+                    "employee": name,
+                    "employee_id": emp_id,
+                    "labor_category": line["lcat"],
+                    "clearance": line["clearance"],
+                    "clin": clin["clin"],
+                    "bill_rate": line["loaded_rate"],
+                }
+            )
+    return {"contract": contract, "roster": roster}
+
+
+def _scenario_member(opts, index):
+    """The roster member for this row when a shared scenario is in play, else
+    None (the builder then falls back to a self-contained random line)."""
+    scenario = (opts or {}).get("_scenario")
+    if not scenario or not scenario["roster"]:
+        return None, None
+    roster = scenario["roster"]
+    return scenario["contract"]["piid"], roster[index % len(roster)]
+
+
+def _labor_export_row(rng, faker, index, opts=None):
+    """One labor distribution / billing line: an employee charged a labor category
+    to a contract CLIN for a period, at a loaded bill rate. hours * bill_rate ==
+    billable_amount, so the dollars reconcile (like the contract invariants). When
+    a shared scenario is present, the person / CLIN / rate come from it so the line
+    ties back to the awarded contract; only the hours and period are re-rolled."""
+    piid, member = _scenario_member(opts, index)
+    if member:
+        name, emp_id = member["employee"], member["employee_id"]
+        lcat, clearance, clin, rate = (
+            member["labor_category"],
+            member["clearance"],
+            member["clin"],
+            member["bill_rate"],
+        )
+    else:
+        spec = rng.choice(_LCATS)
+        rate = _loaded_rate(rng, spec)
+        piid, clin = _charge_ref(rng, faker)
+        name, emp_id = _employee(faker)
+        lcat, clearance = spec["lcat"], spec["clr"] or "None"
+    # Most lines are a full month (~150-184 hrs); some are partial.
+    hours = round(rng.uniform(150, 184) if rng.random() < 0.7 else rng.uniform(16, 140))
+    return {
+        "employee": name,
+        "employee_id": emp_id,
+        "labor_category": lcat,
+        "clearance": clearance,
+        "contract_no": piid,
+        "clin": clin,
+        "period": _recent_month(rng),
+        "hours": float(hours),
+        "bill_rate": rate,
+        "billable_amount": _round_money(hours * rate),
+    }
+
+
+def _timesheet_row(rng, faker, index, opts=None):
+    """One weekly employee timesheet line: hours booked to a charge code (CLIN),
+    split into regular / overtime / leave. A real timesheet carries NO bill rate
+    (that is proprietary and lives on the billing side), so this one doesn't. With
+    a shared scenario, the person and charge code match the labor export and the
+    awarded contract; the hours are re-rolled so each week differs."""
+    piid, member = _scenario_member(opts, index)
+    if member:
+        name, emp_id = member["employee"], member["employee_id"]
+        lcat, clin = member["labor_category"], member["clin"]
+    else:
+        spec = rng.choice(_LCATS)
+        piid, clin = _charge_ref(rng, faker)
+        name, emp_id = _employee(faker)
+        lcat = spec["lcat"]
+    # Regular + leave make up a standard 40-hour week; overtime is on top.
+    leave = float(rng.choice([0, 0, 0, 0, 0, 8, 16]))
+    reg = round(40.0 - leave, 1)
+    ot = float(rng.choice([0, 0, 0, 0, 2, 4, 6, 8]))
+    return {
+        "employee": name,
+        "employee_id": emp_id,
+        "week_ending": _recent_week_ending(rng),
+        "contract_no": piid,
+        "charge_code": clin,
+        "labor_category": lcat,
+        "reg_hours": reg,
+        "ot_hours": ot,
+        "leave_hours": leave,
+        "total_hours": round(reg + ot + leave, 1),
+        "approved_by": faker.name(),
+    }
 
 
 # --- The preset registry ------------------------------------------------------
@@ -950,6 +1339,26 @@ PRESETS = {
         "kind": "data",
         "build": build_contract,
     },
+    "govcon_labor_export": {
+        "label": "Labor Distribution Export",
+        "description": "A labor billing/cost distribution export: employee, labor "
+        "category, contract/CLIN, hours, bill rate and billable amount by period "
+        "(hours × rate reconciles). Modeled after a Unanet / Deltek Costpoint "
+        "labor export — feeds bill-rate and burn-rate analysis.",
+        "kind": "data",
+        "build": _labor_export_row,
+        "scenario": True,
+    },
+    "govcon_timesheet": {
+        "label": "Timesheet",
+        "description": "Weekly employee timesheets: charge code/CLIN with regular, "
+        "overtime and leave hours by week-ending date, plus approver. No bill rate "
+        "(as on a real timesheet). Modeled after a Unanet / Deltek Costpoint "
+        "timesheet export.",
+        "kind": "data",
+        "build": _timesheet_row,
+        "scenario": True,
+    },
 }
 
 
@@ -982,6 +1391,14 @@ def generate_preset(key, *, rows=5, seed=None, opts=None):
     faker = Faker()
     if seed is not None:
         faker.seed_instance(seed)
+
+    # Scenario presets (the labor exports) share a seed-stable contract + roster so
+    # their rows tie back to the awarded contract. Built from the untouched user
+    # opts, then passed to each row via a private opts key.
+    opts = dict(opts or {})
+    if PRESETS[key].get("scenario"):
+        base_opts = {k: v for k, v in opts.items() if not k.startswith("_")}
+        opts["_scenario"] = build_scenario(seed, base_opts)
 
     build = PRESETS[key]["build"]
     return [build(rng, faker, i, opts) for i in range(max(0, rows))]
