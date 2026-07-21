@@ -238,6 +238,15 @@ def _doc_lines(pdf, row, names):
     value_w = max(20.0, usable - label_w)
     line_h = 6.5
     for name in names:
+        value = row.get(name)
+        # A nested list (e.g. CLINs): show the label, then a line-item table.
+        if isinstance(value, list):
+            pdf.set_xy(left, pdf.get_y())
+            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_text_color(90, 90, 90)
+            pdf.multi_cell(usable, line_h, _humanize(name), align="L")
+            pdf.set_y(_record_table(pdf, value, left, usable, pdf.get_y()) + 2.0)
+            continue
         y0 = pdf.get_y()
         # Label in the left column.
         pdf.set_xy(left, y0)
@@ -287,16 +296,89 @@ def _doc_prose(pdf, row, template):
     pdf.set_text_color(0, 0, 0)
 
 
-_AMOUNT_HINTS = ("amount", "total", "price", "value", "cost", "obligated")
+_AMOUNT_HINTS = ("amount", "total", "price", "value", "cost", "obligated", "ceiling")
+
+
+def _looks_like_amount(name):
+    """True if a field name reads like money (used to right-align columns and
+    find the form's total)."""
+    low = str(name).lower()
+    return any(hint in low for hint in _AMOUNT_HINTS)
 
 
 def _guess_amount_field(names):
     """The first field that looks like a money total, for the form's total box."""
     for name in names:
-        low = name.lower()
-        if any(hint in low for hint in _AMOUNT_HINTS):
+        if _looks_like_amount(name):
             return name
     return None
+
+
+def _record_table(pdf, items, left, width, y):
+    """Draw a list of child records (e.g. CLIN line items) as a bordered table:
+    a header row of column names, then one row per item. Money-looking columns
+    are right-aligned. Returns the y just below the table.
+
+    If the rows would run past the usable page area they are truncated with a
+    visible "+N more" note rather than drawn off-page — realistic contracts have
+    few enough line items to fit, and truncation is surfaced, never silent.
+    """
+    if not items:
+        pdf.rect(left, y, width, 6)
+        pdf.set_xy(left + 2, y + 1.6)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(120, 120, 120)
+        pdf.cell(width - 4, 3, "(no line items)")
+        pdf.set_text_color(0, 0, 0)
+        return y + 6
+
+    columns = list(items[0].keys())
+    col_w = width / max(1, len(columns))
+    hrow, rrow = 6.0, 6.0
+    bottom = pdf.h - pdf.b_margin - 22  # leave room for the total + signature
+
+    pdf.set_font("Helvetica", "B", 7)
+    pdf.set_text_color(60, 60, 60)
+    for ci, col in enumerate(columns):
+        pdf.rect(left + ci * col_w, y, col_w, hrow)
+        pdf.set_xy(left + ci * col_w + 1.5, y + 1.7)
+        pdf.cell(
+            col_w - 3, 3, _fit(_humanize(col).upper(), max(3, int((col_w - 3) / 1.5)))
+        )
+    y += hrow
+
+    aligns = ["R" if _looks_like_amount(col) else "L" for col in columns]
+    shown = 0
+    for item in items:
+        if y + rrow > bottom:
+            break
+        for ci, (col, align) in enumerate(zip(columns, aligns)):
+            x = left + ci * col_w
+            pdf.rect(x, y, col_w, rrow)
+            pdf.set_xy(x + 1.5, y + 1.6)
+            pdf.set_font("Courier", "", 8.5)
+            pdf.set_text_color(20, 20, 20)
+            pdf.cell(
+                col_w - 3,
+                3,
+                _fit(_cell_text(item.get(col)), max(3, int((col_w - 3) / 1.7))),
+                align=align,
+            )
+        y += rrow
+        shown += 1
+
+    if shown < len(items):
+        pdf.set_font("Helvetica", "I", 7)
+        pdf.set_text_color(120, 120, 120)
+        pdf.set_xy(left + 1.5, y + 1)
+        pdf.cell(
+            width - 3,
+            3,
+            f"... +{len(items) - shown} more line items (see the data export for all)",
+        )
+        y += 5
+    pdf.set_text_color(0, 0, 0)
+    return y
 
 
 def _form_box(pdf, x, y, w, h, label, value):
@@ -325,6 +407,9 @@ def _doc_form(pdf, row, title, header_fields, body_fields):
     left = pdf.l_margin
     width = pdf.w - pdf.l_margin - pdf.r_margin
     y = pdf.t_margin
+    # The form is laid out by hand with rect()/explicit y, so turn off automatic
+    # page breaks; the line-item table manages its own overflow.
+    pdf.set_auto_page_break(False)
 
     # Title banner + honest "simulated" caption.
     pdf.rect(left, y, width, 11)
@@ -365,6 +450,15 @@ def _doc_form(pdf, row, title, header_fields, body_fields):
     label_w = 60.0
     line_h = 7.0
     for name in body_fields:
+        value = row.get(name)
+        # A nested list (e.g. CLINs) becomes a captioned line-item table.
+        if isinstance(value, list):
+            pdf.set_xy(left + 2, y + 1)
+            pdf.set_font("Helvetica", "B", 7.5)
+            pdf.set_text_color(70, 70, 70)
+            pdf.cell(width - 4, 3, _humanize(name).upper())
+            y = _record_table(pdf, value, left, width, y + 5)
+            continue
         pdf.rect(left, y, label_w, line_h)
         pdf.rect(left + label_w, y, width - label_w, line_h)
         pdf.set_xy(left + 2, y + 1.7)
@@ -374,7 +468,7 @@ def _doc_form(pdf, row, title, header_fields, body_fields):
         pdf.set_xy(left + label_w + 2, y + 1.7)
         pdf.set_font("Courier", "", 9)
         pdf.set_text_color(20, 20, 20)
-        pdf.cell(width - label_w - 4, 4, _fit(_cell_text(row.get(name)), 62))
+        pdf.cell(width - label_w - 4, 4, _fit(_cell_text(value), 62))
         y += line_h
 
     # Total-award box, if a money-looking field exists.

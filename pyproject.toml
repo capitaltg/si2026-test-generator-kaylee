@@ -13,7 +13,7 @@ requires-python = ">=3.9"
 # reproducible. fpdf2 is a small, pure-Python PDF library; it is a core (not
 # optional) dependency because producing realistic sample PDFs is a core purpose
 # of this tool, not an add-on.
-dependencies = ["Faker", "fpdf2"]
+dependencies = ["Faker", "fpdf2", "pypdf", "reportlab"]
 
 # Optional extras. These are NOT installed by a plain `pip install .`; you opt
 # in by name. The `web` group holds everything the Fixtura web front door needs
@@ -31,3 +31,8 @@ testgen = "testgen.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["testgen*"]
+
+# Ship the blank government forms (public-domain federal forms) that formfill.py
+# fills; without this they'd be left out of an installed package.
+[tool.setuptools.package-data]
+testgen = ["forms/*.pdf"]

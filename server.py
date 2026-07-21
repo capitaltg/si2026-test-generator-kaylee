@@ -33,8 +33,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from testgen import (
+    PRESETS,
     field_type_groups,
+    fill_forms_bytes,
     generate,
+    generate_preset,
+    list_presets,
+    preset_form_values,
+    render_fillable,
     to_csv_string,
     to_pdf_docs_bytes,
     to_pdf_table_bytes,
@@ -66,9 +72,14 @@ class FieldSpec(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    fields: List[FieldSpec]
+    # Either build from an explicit field list, OR from a named preset (a
+    # GovCon document template). When preset is set, fields may be empty and the
+    # preset's builder produces each row instead.
+    fields: List[FieldSpec] = []
     rows: int = 25
     seed: Optional[int] = 42
+    preset: Optional[str] = None
+    preset_opts: Optional[dict] = None
 
 
 class ExportRequest(GenerateRequest):
@@ -102,8 +113,15 @@ def _schema_from(fields: List[FieldSpec]) -> List[dict]:
 
 
 def _make_rows(req: GenerateRequest) -> List[dict]:
-    """Shared generate step with a friendly error instead of a 500 crash."""
+    """Shared generate step with a friendly error instead of a 500 crash.
+
+    A preset request runs the preset's builder (a whole-record, internally
+    consistent GovCon document); otherwise we generate from the field list."""
     try:
+        if req.preset:
+            return generate_preset(
+                req.preset, rows=req.rows, seed=req.seed, opts=req.preset_opts
+            )
         return generate(_schema_from(req.fields), rows=req.rows, seed=req.seed)
     except (ValueError, KeyError) as error:
         raise HTTPException(status_code=400, detail=str(error))
@@ -120,6 +138,12 @@ def field_types() -> dict:
         for name, items in field_type_groups()
     ]
     return {"groups": groups}
+
+
+@app.get("/templates")
+def templates() -> dict:
+    """The GovCon document presets available in the gallery."""
+    return {"presets": list_presets()}
 
 
 @app.post("/generate")
@@ -170,6 +194,30 @@ _EXPORTS = {
 def export(req: ExportRequest) -> Response:
     """Generate rows and return them as a downloadable file in the chosen
     format."""
+    # A form-backed preset (SF-1449 / SF-30) always exports as a filled real
+    # form PDF: one copy of the form per generated record, regardless of the
+    # requested `format`. The mapping turns each consistent record into the
+    # form's field values.
+    preset_kind = PRESETS.get(req.preset, {}).get("kind") if req.preset else None
+    if preset_kind in ("form", "doc"):
+        records = _make_rows(req)
+        preset = PRESETS[req.preset]
+        try:
+            if preset_kind == "form":
+                values_list = [preset_form_values(req.preset, r) for r in records]
+                content = fill_forms_bytes(preset["form"], values_list)
+            else:
+                # Custom document with no official form: render as a fillable
+                # AcroForm PDF (editable fields), one page-set per record.
+                content = render_fillable(records, preset["blocks"])
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        return Response(
+            content=content,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{req.preset}.pdf"'},
+        )
+
     if req.format not in _EXPORTS:
         raise HTTPException(
             status_code=400,

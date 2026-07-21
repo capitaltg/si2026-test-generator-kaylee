@@ -21,6 +21,9 @@ const state = {
   pdfDoc: { title: "", placement: {}, style: "sheet", template: "" },
   nextId: 0,
   fields: [],
+  preset: null, // active GovCon template key (null = normal builder mode)
+  presetKind: null, // "form" | "data" — how the active preset renders/exports
+  presets: [], // template gallery, from GET /templates
   groups: [], // grouped type menu from the API
   labels: {}, // type -> human label, for the table header
   rows: [], // last generated preview rows
@@ -163,8 +166,8 @@ function fieldCardHtml(field) {
 }
 
 function renderInputTabs() {
-  const tabs = ["builder", "ddl", "describe", "csv", "json"];
-  const labels = { builder: "Builder", ddl: "DDL", describe: "Describe", csv: "CSV", json: "JSON" };
+  const tabs = ["builder", "templates", "ddl", "describe", "csv", "json"];
+  const labels = { builder: "Builder", templates: "Templates", ddl: "DDL", describe: "Describe", csv: "CSV", json: "JSON" };
   $("#inputTabs").innerHTML = tabs
     .map(
       (t) =>
@@ -173,8 +176,34 @@ function renderInputTabs() {
     .join("");
 }
 
+// The template gallery: a card per GovCon preset. The active one is highlighted.
+// Picking a card is what turns on preset mode; there's also a card to leave it.
+function galleryHtml() {
+  const badges = { form: "Real gov form", doc: "Document", data: "Dataset" };
+  const cards = state.presets
+    .map((p) => {
+      const active = state.preset === p.key;
+      return (
+        `<button class="tpl-card ${active ? "active" : ""}" data-preset="${escapeHtml(p.key)}">` +
+        `<div class="tpl-top"><span class="tpl-name">${escapeHtml(p.label)}</span>` +
+        `<span class="tpl-badge tpl-badge-${p.kind}">${escapeHtml(badges[p.kind] || p.kind)}</span></div>` +
+        `<div class="tpl-desc">${escapeHtml(p.description)}</div></button>`
+      );
+    })
+    .join("");
+  return (
+    `<div class="tpl-intro">Pick a GovCon document template. It autogenerates realistic, ` +
+    `internally-consistent data — change the <b>seed</b> above to re-roll.</div>` +
+    `<div class="tpl-gallery">${cards}</div>`
+  );
+}
+
 function renderInputPanel() {
   const panel = $("#inputPanel");
+  if (state.inputTab === "templates") {
+    panel.innerHTML = galleryHtml();
+    return;
+  }
   if (state.inputTab !== "builder") {
     panel.innerHTML = `<div class="placeholder">The <b>${state.inputTab.toUpperCase()}</b> input method arrives in the next update (Phase 5). Use <b>Builder</b> for now.</div>`;
     return;
@@ -191,7 +220,11 @@ function renderInputPanel() {
 }
 
 function renderOutputTabs() {
-  const tabs = ["table", "json", "csv", "sql", "pdf"];
+  // A data preset is a real dataset, so it gets the same text-format tabs the
+  // builder does (minus PDF). A form/doc preset renders a fixed PDF, so it has
+  // no tabs at all.
+  const isData = state.preset && state.presetKind === "data";
+  const tabs = isData ? ["table", "json", "csv", "sql"] : ["table", "json", "csv", "sql", "pdf"];
   $("#outputTabs").innerHTML = tabs
     .map(
       (t) =>
@@ -202,8 +235,11 @@ function renderOutputTabs() {
   // Table/Doc toggle only makes sense while PDF is selected, and Copy makes no
   // sense for a binary file, so show each contextually.
   const isPdf = state.outputTab === "pdf";
-  $("#pdfCtrl").style.display = isPdf ? "" : "none";
-  $("#copy").style.display = isPdf ? "none" : "";
+  // Only a form/doc preset (fixed PDF) hides the tabs; a data preset keeps them.
+  const tplForm = state.preset && state.presetKind !== "data";
+  $("#outputTabs").style.display = tplForm ? "none" : "";
+  $("#pdfCtrl").style.display = !state.preset && isPdf ? "" : "none";
+  $("#copy").style.display = tplForm || isPdf ? "none" : "";
   renderRowsCtrl();
 }
 
@@ -211,6 +247,15 @@ function renderRowsCtrl() {
   // Common counts live in the dropdown; the box beside it holds any other
   // number. Whichever currently holds the active count is highlighted; the
   // other stays neutral (the box fades to its "custom" placeholder).
+  // The count means different things per context, so label it accordingly:
+  // separate generated documents are "Copies"; the PDF doc-per-row tab is
+  // "Docs"; everything else is table "Rows".
+  const lbl = $("#rowsLbl");
+  if (lbl) {
+    if (state.preset && state.presetKind !== "data") lbl.textContent = "Copies";
+    else if (!state.preset && state.outputTab === "pdf" && state.pdfMode === "docs") lbl.textContent = "Docs";
+    else lbl.textContent = "Rows";
+  }
   const presets = [10, 100, 1000, 10000];
   const rc = Number(state.rowCount);
   const isPreset = presets.includes(rc);
@@ -231,7 +276,11 @@ function cellHtml(value) {
 
 function tableHtml() {
   if (!state.rows.length) return `<div class="placeholder">No rows yet.</div>`;
-  const cols = state.fields.map((f) => ({ name: f.name, label: state.labels[f.type] || f.type }));
+  // A preset's columns come from the generated records; the builder's come from
+  // the configured field list.
+  const cols = state.preset
+    ? Object.keys(state.rows[0]).map((n) => ({ name: n, label: n }))
+    : state.fields.map((f) => ({ name: f.name, label: state.labels[f.type] || f.type }));
   const head =
     `<th class="num">#</th>` +
     cols
@@ -244,7 +293,7 @@ function tableHtml() {
     .map(
       (row, i) =>
         `<tr><td class="num">${i + 1}</td>` +
-        state.fields.map((f) => cellHtml(row[f.name])).join("") +
+        cols.map((c) => cellHtml(row[c.name])).join("") +
         `</tr>`
     )
     .join("");
@@ -267,13 +316,11 @@ function codeHtml(text) {
 
 async function exportText(format) {
   if (state.exportCache[format] != null) return state.exportCache[format];
-  const resp = await postJSON("/export", {
-    fields: buildFields(),
-    rows: Math.min(state.rowCount, PREVIEW_CAP),
-    seed: state.seed,
-    format,
-    table: state.tableName,
-  });
+  // A data preset exports its records; the builder exports its field schema.
+  const body = state.preset
+    ? { preset: state.preset, rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.preset }
+    : { fields: buildFields(), rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.tableName };
+  const resp = await postJSON("/export", body);
   const text = await resp.text();
   state.exportCache[format] = text;
   return text;
@@ -414,6 +461,9 @@ async function loadPdfPreview() {
 async function renderOutput() {
   const body = $("#outputBody");
   const tab = state.outputTab;
+  // A form/doc preset is driven entirely by the preset (a fixed PDF). The
+  // builder and data presets are tab-driven and share the rendering below.
+  if (state.preset && state.presetKind !== "data") return generatePreset(Number(state.rowCount) || 0);
   if (tab === "table") {
     body.innerHTML = tableHtml();
   } else if (tab === "json") {
@@ -446,27 +496,80 @@ function buildFields() {
   });
 }
 
+// Switch the studio into (or out of) template mode. An empty key clears it.
+function selectPreset(key) {
+  if (!key) {
+    state.preset = null;
+    state.presetKind = null;
+  } else {
+    const p = state.presets.find((x) => x.key === key);
+    if (!p) return;
+    state.preset = key;
+    state.presetKind = p.kind;
+    // Forms are heavy (one filled form per row); default to a sensible few.
+    if (p.kind === "form" && Number(state.rowCount) > 10) state.rowCount = 3;
+    // A data preset has no PDF tab; if PDF was active, fall back to the table.
+    if (p.kind === "data" && state.outputTab === "pdf") state.outputTab = "table";
+  }
+  renderInputPanel();
+  renderOutputTabs();
+  generate();
+}
+
 async function generate() {
   state.exportCache = {}; // fresh generation invalidates cached exports
   const total = Number(state.rowCount) || 0;
   $("#statSeed").textContent = state.seed;
+  // A form/doc preset renders a fixed PDF preview. The builder and data presets
+  // both produce rows we render through the format tabs.
+  if (state.preset && state.presetKind !== "data") return generatePreset(total);
   try {
-    const resp = await postJSON("/generate", {
-      fields: buildFields(),
-      rows: Math.min(total, PREVIEW_CAP),
-      seed: state.seed,
-    });
+    const body = state.preset
+      ? presetReqBody(Math.min(total, PREVIEW_CAP))
+      : { fields: buildFields(), rows: Math.min(total, PREVIEW_CAP), seed: state.seed };
+    const resp = await postJSON("/generate", body);
     state.rows = (await resp.json()).rows;
   } catch (e) {
     state.rows = [];
     toast("Could not generate: " + e.message);
   }
-  $("#statRows").textContent = total.toLocaleString() + " rows";
+  $("#statRows").textContent =
+    total.toLocaleString() + (state.preset ? " records" : " rows");
   $("#statNote").textContent =
     total > PREVIEW_CAP
       ? `Showing first ${PREVIEW_CAP} of ${total.toLocaleString()} — export for the full set`
       : "";
   renderOutput();
+}
+
+// Form/doc preset preview: render a filled-form PDF, one copy per record. (Data
+// presets don't come here — they render through the format tabs like the builder.)
+async function generatePreset(total) {
+  const body = $("#outputBody");
+  $("#statRows").textContent = total.toLocaleString() + " docs";
+  $("#statNote").textContent = "";
+  body.innerHTML =
+    `<div class="pdf-pane"><div class="pdf-controls"><div class="pdf-hint">` +
+    `Filled real form — one copy per record, each with generated, reconciling data. ` +
+    `Change the seed to re-roll; click Export to download.</div></div>` +
+    `<div class="pdf-preview"><iframe id="pdfFrame" title="Form preview"></iframe>` +
+    `<div class="pdf-preview-note" id="pdfNote">Building preview…</div></div></div>`;
+  try {
+    const resp = await postJSON("/export", presetReqBody(Math.min(total, 5)));
+    const blob = await resp.blob();
+    if (lastPdfUrl) URL.revokeObjectURL(lastPdfUrl);
+    lastPdfUrl = URL.createObjectURL(blob);
+    $("#pdfFrame").src = lastPdfUrl + "#toolbar=0&navpanes=0&view=FitH";
+    const note = $("#pdfNote");
+    if (note) note.textContent = total > 5 ? `Preview · first 5 of ${total} forms · Export for all` : `Preview · ${total} form${total === 1 ? "" : "s"}`;
+  } catch (e) {
+    const note = $("#pdfNote");
+    if (note) note.textContent = "Preview error: " + e.message;
+  }
+}
+
+function presetReqBody(rows) {
+  return { preset: state.preset, rows, seed: state.seed, format: "pdf", table: state.preset };
 }
 
 function addField() {
@@ -507,6 +610,46 @@ async function download() {
   // Export follows the active output tab. For PDF the Table/Doc toggle picks the
   // flavour; document mode passes a light pdf_config (the seam where a richer,
   // e.g. award-letter, layout plugs in later — for now it just titles each doc).
+  // Template mode exports the preset (a filled form PDF, or the dataset).
+  if (state.preset) {
+    try {
+      if (state.presetKind !== "data") {
+        const resp = await postJSON("/export", presetReqBody(Math.min(Number(state.rowCount) || 1, 200)));
+        const blob = await resp.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = state.preset + ".pdf";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        toast("Downloaded " + a.download);
+      } else {
+        // Data preset: export in the active tab's format (Table downloads CSV).
+        const fmt = state.outputTab === "table" ? "csv" : state.outputTab;
+        const ext = { csv: "csv", json: "json", sql: "sql" }[fmt] || fmt;
+        const resp = await postJSON("/export", {
+          preset: state.preset,
+          rows: Math.min(Number(state.rowCount) || 0, 50000),
+          seed: state.seed,
+          format: fmt,
+          table: state.preset,
+        });
+        const blob = await resp.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = state.preset + "." + ext;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        toast("Downloaded " + a.download);
+      }
+    } catch (e) {
+      toast("Export failed: " + e.message);
+    }
+    return;
+  }
   const tab = state.outputTab;
   let format, ext, extra;
   if (tab === "pdf") {
@@ -559,6 +702,7 @@ function wireEvents() {
     document
       .querySelectorAll(".pdf-mode")
       .forEach((x) => x.classList.toggle("active", x.dataset.pdfmode === state.pdfMode));
+    renderRowsCtrl();
     if (state.outputTab === "pdf") renderOutput();
   });
 
@@ -631,6 +775,14 @@ function wireEvents() {
     const b = e.target.closest("[data-tab]");
     if (!b) return;
     state.inputTab = b.dataset.tab;
+    // Navigating to any tab exits template mode, so the normal output controls
+    // (tabs, export options) come back.
+    if (state.preset) {
+      state.preset = null;
+      state.presetKind = null;
+      renderOutputTabs();
+      generate();
+    }
     renderInputTabs();
     renderInputPanel();
   });
@@ -660,6 +812,15 @@ function wireEvents() {
     generate(); // any committed edit refreshes the preview
   });
   panel.addEventListener("click", (e) => {
+    // Template gallery cards / the "back to builder" button.
+    const card = e.target.closest("[data-preset]");
+    if (card) {
+      const key = card.dataset.preset;
+      if (!key) state.inputTab = "builder"; // clearing returns to the builder
+      selectPreset(key);
+      if (!key) renderInputTabs();
+      return;
+    }
     const b = e.target.closest("[data-action]");
     if (!b) return;
     if (b.dataset.action === "add") addField();
@@ -677,6 +838,11 @@ async function init() {
     data.groups.forEach((g) => g.types.forEach((t) => (state.labels[t.value] = t.label)));
   } catch (e) {
     toast("Could not load field types");
+  }
+  try {
+    state.presets = (await (await fetch("/templates")).json()).presets;
+  } catch (e) {
+    state.presets = [];
   }
 
   // A GovCon-flavoured starting schema so the page opens with something real.

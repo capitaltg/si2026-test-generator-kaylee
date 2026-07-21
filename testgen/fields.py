@@ -186,6 +186,46 @@ def _as_date(value):
     return datetime.date.fromisoformat(value)
 
 
+def make_record(schema, index, rng, faker):
+    """Build one record dict from a (sub)schema, honouring per-field null_pct.
+
+    This is the shared per-row logic used both by the engine's top-level loop
+    and by the nested `list` field type below, so a child record is generated
+    exactly the way a top-level row is. Kept here (not in core.py) so the nested
+    field type can reach it without a circular import.
+    """
+    record = {}
+    for field in schema:
+        null_pct = field.get("null_pct", 0)
+        if null_pct and rng.random() * 100 < null_pct:
+            record[field["name"]] = None
+        else:
+            record[field["name"]] = FIELD_TYPES[field["type"]](field, index, rng, faker)
+    return record
+
+
+def _list(field, index, rng, faker):
+    """A nested list of child records — e.g. the CLIN line items on a contract.
+
+    Options:
+      fields     the child schema (a list of field specs), same shape as the
+                 top-level schema
+      count      a fixed number of children, OR
+      min, max   a random child count in this inclusive range (defaults 1..3)
+
+    Returns a list of dicts. Children are generated with the same seeded rng and
+    faker, so the whole nested structure stays reproducible. Each child's own
+    row index is used, so a `sequence` inside the list counts 0,1,2,... per
+    parent.
+    """
+    child_schema = field.get("fields") or []
+    if "count" in field:
+        n = int(field["count"])
+    else:
+        n = rng.randint(int(field.get("min", 1)), int(field.get("max", 3)))
+    return [make_record(child_schema, i, rng, faker) for i in range(max(0, n))]
+
+
 # --- Fixtura parity: extra generators to match the designed type menu --------
 # Each still follows the standard fn(field, index, rng, faker) signature. Where
 # Faker offers a good realistic value we use it (all seeded, so reproducible);
@@ -339,6 +379,11 @@ FIELD_TYPES = {
     "autoIncrement": _sequence,
     "price": _money,
     "enum": _choice,
+    # nested: a field whose value is a list of child records (e.g. CLIN line
+    # items). Used by document presets; aliases cover the likely spellings.
+    "list": _list,
+    "subtable": _list,
+    "lineItems": _list,
 }
 
 
