@@ -341,7 +341,7 @@ async function inferAndGenerate(mode) {
   const n = fields.length;
   state.sourceMsg[mode] = {
     ok: true,
-    text: `Detected ${n} field${n === 1 ? "" : "s"} — switch to Builder to fine-tune.`,
+    text: `Detected ${n} field${n === 1 ? "" : "s"} — switch to Builder to fine-tune, or hit Save to keep it as a template.`,
   };
   renderOutputTabs();
   renderInputPanel();
