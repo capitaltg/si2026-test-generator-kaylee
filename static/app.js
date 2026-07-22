@@ -24,6 +24,9 @@ const state = {
   preset: null, // active GovCon template key (null = normal builder mode)
   presetKind: null, // "form" | "data" — how the active preset renders/exports
   presets: [], // template gallery, from GET /templates
+  custom: [], // user-saved templates, from localStorage
+  loadedTemplateKey: null, // key of the saved template currently loaded (for "Update")
+  galleryFilter: "all", // gallery toggle bar: all | form | doc | data | custom
   groups: [], // grouped type menu from the API
   labels: {}, // type -> human label, for the table header
   rows: [], // last generated preview rows
@@ -76,6 +79,39 @@ function escapeHtml(v) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+// --- saved templates (localStorage) ----------------------------------------
+// Custom templates the user saves live entirely in the browser. Each is a
+// snapshot of the studio: either a Builder setup (fields + theme + table) or a
+// bookmark onto a GovCon preset (base + opts). They appear in the gallery under
+// the "Mine" filter with kind "custom".
+const TPL_STORE = "fixtura.templates.v1";
+
+// The gallery toggle bar: [filter key, label]. "all" shows everything; the kind
+// filters match a preset's `kind`; "custom" is the user's saved templates.
+const GALLERY_FILTERS = [
+  ["all", "All"],
+  ["form", "Forms"],
+  ["doc", "Documents"],
+  ["data", "Datasets"],
+  ["custom", "Saved"],
+];
+
+function loadCustomTemplates() {
+  try {
+    return JSON.parse(localStorage.getItem(TPL_STORE)) || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function persistCustomTemplates() {
+  try {
+    localStorage.setItem(TPL_STORE, JSON.stringify(state.custom));
+  } catch (e) {
+    toast("Couldn't save — browser storage may be full");
+  }
 }
 
 async function postJSON(path, body) {
@@ -179,22 +215,55 @@ function renderInputTabs() {
 // The template gallery: a card per GovCon preset. The active one is highlighted.
 // Picking a card is what turns on preset mode; there's also a card to leave it.
 function galleryHtml() {
-  const badges = { form: "Real gov form", doc: "Document", data: "Dataset" };
-  const cards = state.presets
+  const badges = { form: "Real gov form", doc: "Document", data: "Dataset", custom: "Saved" };
+  // Built-in presets and the user's saved templates share one card grid; the
+  // toggle bar just filters which kinds show.
+  const all = state.presets.concat(state.custom);
+  const filter = state.galleryFilter;
+  const shown = filter === "all" ? all : all.filter((p) => p.kind === filter);
+
+  const bar = GALLERY_FILTERS.map(
+    ([key, label]) =>
+      `<button class="tpl-filter ${state.galleryFilter === key ? "active" : ""}" ` +
+      `data-filter="${key}">${label}</button>`
+  ).join("");
+
+  const cards = shown
     .map((p) => {
       const active = state.preset === p.key;
+      const isCustom = p.kind === "custom";
+      // Custom cards are divs (not buttons) so the title can be edited inline;
+      // role/tabindex keep them keyboard-activatable.
+      const tag = isCustom ? "div" : "button";
+      const attrs = isCustom ? ' role="button" tabindex="0"' : "";
       return (
-        `<button class="tpl-card ${active ? "active" : ""}" data-preset="${escapeHtml(p.key)}">` +
+        `<${tag} class="tpl-card ${active ? "active" : ""}"${attrs} data-preset="${escapeHtml(p.key)}">` +
         `<div class="tpl-top"><span class="tpl-name">${escapeHtml(p.label)}</span>` +
         `<span class="tpl-badge tpl-badge-${p.kind}">${escapeHtml(badges[p.kind] || p.kind)}</span></div>` +
-        `<div class="tpl-desc">${escapeHtml(p.description)}</div></button>`
+        `<div class="tpl-desc">${escapeHtml(p.description)}</div>` +
+        (isCustom
+          ? `<span class="tpl-act tpl-rename" data-rename="${escapeHtml(p.key)}" title="Rename">✎</span>` +
+            `<span class="tpl-act tpl-del" data-del="${escapeHtml(p.key)}" title="Delete">✕</span>`
+          : "") +
+        `</${tag}>`
       );
     })
     .join("");
+
+  const empty = shown.length
+    ? ""
+    : filter === "custom"
+      ? `<div class="tpl-empty">No saved templates yet. Set up the Builder (or pick a ` +
+        `GovCon template), then hit <b>Save</b> up top.</div>`
+      : `<div class="tpl-empty">Nothing here.</div>`;
+
   return (
-    `<div class="tpl-intro">Pick a GovCon document template. It autogenerates realistic, ` +
-    `internally-consistent data — change the <b>seed</b> above to re-roll.</div>` +
-    `<div class="tpl-gallery">${cards}</div>`
+    `<div class="tpl-intro">Pick a GovCon document template — or one of your own saved ` +
+    `setups. It autogenerates realistic, internally-consistent data — change the ` +
+    `<b>seed</b> above to re-roll.</div>` +
+    `<div class="tpl-filterbar">${bar}</div>` +
+    `<div class="tpl-gallery">${cards}</div>` +
+    empty
   );
 }
 
@@ -498,6 +567,9 @@ function buildFields() {
 
 // Switch the studio into (or out of) template mode. An empty key clears it.
 function selectPreset(key) {
+  // Entering a GovCon preset (or clearing to the builder) drops any loaded
+  // custom-template context — "Update" no longer applies.
+  state.loadedTemplateKey = null;
   if (!key) {
     state.preset = null;
     state.presetKind = null;
@@ -514,6 +586,284 @@ function selectPreset(key) {
   renderInputPanel();
   renderOutputTabs();
   generate();
+}
+
+// --- saving & restoring templates ------------------------------------------
+
+// Saving is file-like: a template's identity is its name. Save writes the
+// current Builder setup under a name; if that name is already taken by a
+// DIFFERENT template, the modal asks whether to Replace it or save a copy.
+// Renaming is handled inline on the card (see startInlineRename), not here.
+let pendingSnapshot = null; // studio snapshot awaiting a name in the modal
+let pendingClash = null; // an existing template whose name the new one collides with
+
+// Capture the current Builder setup as a saveable snapshot. (Saving a GovCon
+// preset as a template is deferred to a later ticket — see openSaveModal.)
+function currentTemplateSnapshot() {
+  return {
+    origin: "builder",
+    fields: JSON.parse(JSON.stringify(state.fields)),
+    theme: $("#theme").value,
+    customColor: $("#customColor").value,
+    table: state.tableName,
+    seed: state.seed,
+    rowCount: state.rowCount,
+  };
+}
+
+// One-line card summary of a snapshot: "N fields · seed X · N rows".
+function describeSnapshot(s) {
+  return `${s.fields.length} field${s.fields.length === 1 ? "" : "s"} · seed ${s.seed} · ${s.rowCount} rows`;
+}
+
+// The saved template whose name matches `name` (case-insensitive), or null.
+function templateByName(name) {
+  const n = name.trim().toLowerCase();
+  return state.custom.find((c) => c.label.trim().toLowerCase() === n) || null;
+}
+
+// True if any OTHER template uses this name — used to keep inline renames and
+// "Save a copy" from producing duplicates.
+function nameTaken(name, exceptKey) {
+  const clash = templateByName(name);
+  return !!clash && clash.key !== exceptKey;
+}
+
+// Derive a free name from a base by appending " (2)", " (3)", … as needed.
+function uniqueName(base) {
+  let name = base;
+  let i = 2;
+  while (nameTaken(name, null)) name = `${base} (${i++})`;
+  return name;
+}
+
+function showModalError(msg) {
+  const el = $("#saveModalErr");
+  el.textContent = msg;
+  el.hidden = false;
+}
+function clearModalError() {
+  $("#saveModalErr").hidden = true;
+}
+
+// The saved template currently loaded, if it still exists.
+function loadedTemplate() {
+  return state.loadedTemplateKey
+    ? state.custom.find((c) => c.key === state.loadedTemplateKey)
+    : null;
+}
+
+// Return the modal to its normal (non-conflict) state: just Cancel + Save.
+function resetSaveConflict() {
+  pendingClash = null;
+  $("#saveModalCopy").hidden = true;
+  $("#saveModalReplace").hidden = true;
+  $("#saveModalOk").hidden = false;
+  clearModalError();
+}
+
+function openSaveModal() {
+  // Only Builder setups are saveable for now. GovCon presets have no editable
+  // knobs yet, so saving one would just be a thin seed bookmark — revisit later.
+  if (state.preset) {
+    toast("Saving GovCon templates comes later — Builder setups only for now");
+    return;
+  }
+  pendingSnapshot = currentTemplateSnapshot();
+  resetSaveConflict();
+  const loaded = loadedTemplate();
+  $("#saveModalSub").textContent =
+    `Builder · ${pendingSnapshot.fields.length} field${pendingSnapshot.fields.length === 1 ? "" : "s"} · seed ${pendingSnapshot.seed}`;
+  // Prefill the loaded template's name so re-saving it just overwrites it.
+  $("#saveModalName").value = loaded ? loaded.label : "";
+  $("#saveModal").hidden = false;
+  $("#saveModalName").focus();
+  $("#saveModalName").select();
+}
+
+function closeSaveModal() {
+  $("#saveModal").hidden = true;
+  pendingSnapshot = null;
+  resetSaveConflict();
+}
+
+// After a save, refresh the gallery on the "Saved" filter so the card is there.
+function showSavedGallery() {
+  state.inputTab = "templates";
+  state.galleryFilter = "custom";
+  renderInputTabs();
+  renderInputPanel();
+}
+
+// Create a brand-new saved template from the pending snapshot.
+function createTemplate(name) {
+  const entry = Object.assign(
+    { key: "custom:" + Date.now(), label: name, kind: "custom", description: describeSnapshot(pendingSnapshot) },
+    pendingSnapshot
+  );
+  state.custom.push(entry);
+  state.loadedTemplateKey = entry.key; // now "loaded", so re-saving overwrites it
+  persistCustomTemplates();
+  closeSaveModal();
+  showSavedGallery();
+  toast('Saved "' + name + '"');
+}
+
+// Overwrite an existing template with the pending snapshot (keeps its key).
+function overwriteTemplate(target, name) {
+  Object.assign(target, pendingSnapshot, { label: name, description: describeSnapshot(pendingSnapshot) });
+  state.loadedTemplateKey = target.key;
+  persistCustomTemplates();
+  closeSaveModal();
+  showSavedGallery();
+  toast('Updated "' + name + '"');
+}
+
+// The Save button / Enter. Decides among create, silent-overwrite, and prompting.
+function attemptSave() {
+  const name = $("#saveModalName").value.trim();
+  if (!name || !pendingSnapshot) {
+    $("#saveModalName").focus();
+    return;
+  }
+  const clash = templateByName(name);
+  if (!clash) return createTemplate(name); // free name → new template
+  if (clash.key === state.loadedTemplateKey) return overwriteTemplate(clash, name); // saving over the one you loaded
+  // Name belongs to a different template — ask before clobbering it.
+  pendingClash = clash;
+  showModalError('A template named "' + name + '" already exists.');
+  $("#saveModalOk").hidden = true;
+  $("#saveModalCopy").hidden = false;
+  $("#saveModalReplace").hidden = false;
+}
+
+// Inline rename: turn a saved card's title into an editable field in place.
+// Commit on Enter/blur, cancel on Escape. Rejects a name another template uses.
+let renamingKey = null;
+function startInlineRename(cardEl, key) {
+  const nameEl = cardEl.querySelector(".tpl-name");
+  if (!nameEl || renamingKey) return;
+  renamingKey = key;
+  const original = nameEl.textContent;
+  nameEl.contentEditable = "true";
+  nameEl.classList.add("editing");
+  nameEl.focus();
+  // Select the whole name so typing replaces it.
+  const range = document.createRange();
+  range.selectNodeContents(nameEl);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  const finish = (commit) => {
+    nameEl.removeEventListener("keydown", onKey);
+    nameEl.removeEventListener("blur", onBlur);
+    nameEl.contentEditable = "false";
+    nameEl.classList.remove("editing");
+    renamingKey = null;
+    const next = nameEl.textContent.trim();
+    if (!commit || !next || next === original) {
+      nameEl.textContent = original; // revert
+      return;
+    }
+    if (nameTaken(next, key)) {
+      toast('A template named "' + next + '" already exists');
+      nameEl.textContent = original;
+      return;
+    }
+    const t = state.custom.find((c) => c.key === key);
+    if (t) {
+      t.label = next;
+      persistCustomTemplates();
+    }
+    nameEl.textContent = next;
+    toast('Renamed to "' + next + '"');
+  };
+  const onKey = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      nameEl.blur();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  };
+  const onBlur = () => finish(true);
+  nameEl.addEventListener("keydown", onKey);
+  nameEl.addEventListener("blur", onBlur);
+}
+
+// Rehydrate the studio from a saved custom template and regenerate.
+function restoreCustomTemplate(key) {
+  const t = state.custom.find((c) => c.key === key);
+  if (!t) return;
+  state.seed = t.seed;
+  state.rowCount = t.rowCount;
+  $("#seed").value = t.seed;
+
+  if (t.origin === "preset") {
+    // A bookmark onto a GovCon preset: selectPreset renders + regenerates.
+    selectPreset(t.base);
+    return;
+  }
+
+  // Builder setup: leave preset mode and rebuild the field cards with fresh ids.
+  state.preset = null;
+  state.presetKind = null;
+  state.loadedTemplateKey = key; // mark it loaded so edits can Update it
+  state.tableName = t.table || "users";
+  $("#tableName").value = state.tableName;
+  state.fields = (t.fields || []).map((f) => ({
+    id: uid(),
+    name: f.name,
+    type: f.type,
+    nullPct: f.nullPct || 0,
+    opts: Object.assign({}, f.opts),
+  }));
+
+  const theme = t.theme || "Federal Blue";
+  $("#theme").value = theme;
+  if (theme === "Custom") {
+    $("#customColor").style.display = "";
+    if (t.customColor) $("#customColor").value = t.customColor;
+    applyCustom($("#customColor").value);
+  } else {
+    $("#customColor").style.display = "none";
+    applyAccent(...ACCENTS[theme]);
+  }
+
+  state.inputTab = "builder";
+  renderInputTabs();
+  renderInputPanel();
+  renderOutputTabs();
+  generate();
+}
+
+let pendingDeleteKey = null; // saved-template key awaiting delete confirmation
+
+// Open the designed delete-confirmation dialog for a saved template.
+function deleteCustomTemplate(key) {
+  const t = state.custom.find((c) => c.key === key);
+  if (!t) return;
+  pendingDeleteKey = key;
+  $("#confirmModalSub").innerHTML =
+    `<b>${escapeHtml(t.label)}</b> will be removed for good. This can't be undone.`;
+  $("#confirmModal").hidden = false;
+  $("#confirmOk").focus();
+}
+
+function closeConfirmModal() {
+  $("#confirmModal").hidden = true;
+  pendingDeleteKey = null;
+}
+
+function commitDelete() {
+  if (!pendingDeleteKey) return;
+  if (state.loadedTemplateKey === pendingDeleteKey) state.loadedTemplateKey = null;
+  state.custom = state.custom.filter((c) => c.key !== pendingDeleteKey);
+  persistCustomTemplates();
+  closeConfirmModal();
+  renderInputPanel();
 }
 
 async function generate() {
@@ -693,6 +1043,48 @@ function wireEvents() {
   $("#download").addEventListener("click", download);
   $("#copy").addEventListener("click", copyOutput);
 
+  // Save-as-template: open the modal, save on OK/Enter. When the name collides
+  // with another template, Replace/Save-a-copy appear; editing the name returns
+  // to the normal state.
+  $("#savePreset").addEventListener("click", openSaveModal);
+  $("#saveModalOk").addEventListener("click", attemptSave);
+  $("#saveModalReplace").addEventListener("click", () => {
+    if (pendingClash) overwriteTemplate(pendingClash, $("#saveModalName").value.trim());
+  });
+  $("#saveModalCopy").addEventListener("click", () => {
+    createTemplate(uniqueName($("#saveModalName").value.trim()));
+  });
+  $("#saveModalCancel").addEventListener("click", closeSaveModal);
+  $("#saveModalName").addEventListener("input", resetSaveConflict);
+  $("#saveModalName").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      // In a name conflict, Enter takes the primary (Replace) action.
+      if (pendingClash) overwriteTemplate(pendingClash, $("#saveModalName").value.trim());
+      else attemptSave();
+    } else if (e.key === "Escape") closeSaveModal();
+  });
+  $("#saveModal").addEventListener("click", (e) => {
+    if (e.target.id === "saveModal") closeSaveModal();
+  });
+
+  // Delete-confirmation dialog: confirm on Delete/Enter, dismiss on
+  // Cancel/Esc/backdrop.
+  $("#confirmOk").addEventListener("click", commitDelete);
+  $("#confirmCancel").addEventListener("click", closeConfirmModal);
+  $("#confirmModal").addEventListener("click", (e) => {
+    if (e.target.id === "confirmModal") closeConfirmModal();
+  });
+  // Esc closes whichever dialog is open; Enter confirms a pending delete.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (!$("#saveModal").hidden) closeSaveModal();
+      if (!$("#confirmModal").hidden) closeConfirmModal();
+    } else if (e.key === "Enter" && !$("#confirmModal").hidden) {
+      commitDelete();
+    }
+  });
+
   // PDF Table/Doc toggle: remember the choice, highlight the active button, and
   // refresh the info panel so it reflects the new style.
   $("#pdfCtrl").addEventListener("click", (e) => {
@@ -812,10 +1204,34 @@ function wireEvents() {
     generate(); // any committed edit refreshes the preview
   });
   panel.addEventListener("click", (e) => {
+    // Ignore clicks landing in a title that's currently being renamed inline.
+    if (e.target.isContentEditable) return;
+    // Rename / delete affordances on a saved card — handle before the card.
+    const ren = e.target.closest("[data-rename]");
+    if (ren) {
+      startInlineRename(ren.closest(".tpl-card"), ren.dataset.rename);
+      return;
+    }
+    const del = e.target.closest("[data-del]");
+    if (del) {
+      deleteCustomTemplate(del.dataset.del);
+      return;
+    }
+    // Gallery toggle bar.
+    const filt = e.target.closest("[data-filter]");
+    if (filt) {
+      state.galleryFilter = filt.dataset.filter;
+      renderInputPanel();
+      return;
+    }
     // Template gallery cards / the "back to builder" button.
     const card = e.target.closest("[data-preset]");
     if (card) {
       const key = card.dataset.preset;
+      if (key.startsWith("custom:")) {
+        restoreCustomTemplate(key);
+        return;
+      }
       if (!key) state.inputTab = "builder"; // clearing returns to the builder
       selectPreset(key);
       if (!key) renderInputTabs();
@@ -825,6 +1241,16 @@ function wireEvents() {
     if (!b) return;
     if (b.dataset.action === "add") addField();
     else if (b.dataset.action === "remove") removeField(b.dataset.id);
+  });
+
+  // Custom cards are divs; make Enter open them (buttons do this natively).
+  panel.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.target.isContentEditable) return;
+    const card = e.target.closest('.tpl-card[role="button"]');
+    if (card) {
+      e.preventDefault();
+      restoreCustomTemplate(card.dataset.preset);
+    }
   });
 }
 
@@ -844,6 +1270,7 @@ async function init() {
   } catch (e) {
     state.presets = [];
   }
+  state.custom = loadCustomTemplates();
 
   // A GovCon-flavoured starting schema so the page opens with something real.
   state.fields = [
