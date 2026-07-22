@@ -236,7 +236,7 @@ const SOURCE_TABS = {
     key: "csv",
     button: "Generate from CSV",
     intro:
-      "Drop a <b>.csv</b> file here, or paste its header row. Only the headers are read to infer the schema.",
+      "Give Fixtura a <b>.csv</b> — only the header row is read, and it infers a field type per column.",
     placeholder: "id,full_name,email,company,amount,status",
   },
   json: {
@@ -275,10 +275,21 @@ function sourcePanelHtml(mode) {
   const note = msg
     ? `<div class="src-note ${msg.ok ? "src-ok" : "src-err"}">${escapeHtml(msg.text)}</div>`
     : "";
+  // CSV also gets a real file picker (click to browse) alongside drag-drop and
+  // paste — the input is hidden and driven by the styled button beside it.
+  const filePicker =
+    mode === "csv"
+      ? `<div class="src-file">` +
+        `<input type="file" class="src-file-input" data-csv-file accept=".csv,.tsv,.txt,text/csv" hidden />` +
+        `<button type="button" class="btn btn-ghost src-browse" data-csv-browse>Choose .csv file…</button>` +
+        `<span class="src-file-or">or drop one here / paste the header row below</span>` +
+        `</div>`
+      : "";
   return (
     `<div class="src-panel"${mode === "csv" ? ' data-drop="1"' : ""}>` +
     `<div class="src-intro">${cfg.intro}</div>` +
     chips +
+    filePicker +
     `<textarea class="src-input" data-src="${mode}" spellcheck="false" ` +
     `placeholder="${escapeHtml(cfg.placeholder)}">${text}</textarea>` +
     `<button class="btn btn-primary src-go" data-src-go="${mode}">${cfg.button}</button>` +
@@ -335,6 +346,29 @@ async function inferAndGenerate(mode) {
   renderOutputTabs();
   renderInputPanel();
   await generate();
+}
+
+// Read a picked/dropped .csv into the CSV source box and infer from it. Shared
+// by the drag-drop target and the "Choose file" picker so both behave the same.
+function readCsvFile(file) {
+  if (!file) return;
+  const looksCsv = /\.(csv|tsv|txt)$/i.test(file.name) || /csv|text|excel/i.test(file.type);
+  if (!looksCsv) {
+    state.sourceMsg.csv = { ok: false, text: `“${file.name}” doesn't look like a .csv file.` };
+    renderInputPanel();
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.sources.csv = String(reader.result || "");
+    renderInputPanel();
+    inferAndGenerate("csv");
+  };
+  reader.onerror = () => {
+    state.sourceMsg.csv = { ok: false, text: `Couldn't read “${file.name}”.` };
+    renderInputPanel();
+  };
+  reader.readAsText(file);
 }
 
 function renderInputTabs() {
@@ -1563,15 +1597,22 @@ function wireEvents() {
     if (!zone) return;
     e.preventDefault();
     zone.classList.remove("src-drop-over");
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      state.sources.csv = String(reader.result || "");
-      renderInputPanel();
-      inferAndGenerate("csv");
-    };
-    reader.readAsText(file);
+    readCsvFile(e.dataTransfer.files[0]);
+  });
+
+  // CSV "Choose file" picker: the button opens the hidden file input; picking a
+  // file reads it the same way a drop does. Both are delegated because the CSV
+  // panel re-renders (and rebuilds the input) on every infer.
+  panel.addEventListener("click", (e) => {
+    if (!e.target.closest("[data-csv-browse]")) return;
+    const input = panel.querySelector("[data-csv-file]");
+    if (input) input.click();
+  });
+  panel.addEventListener("change", (e) => {
+    const input = e.target.closest("[data-csv-file]");
+    if (!input) return;
+    readCsvFile(input.files[0]);
+    input.value = ""; // let the same file be re-picked to re-run
   });
 }
 
