@@ -148,8 +148,15 @@ body {
 .tpl-card.active { border-color: var(--accent); box-shadow: 0 3px 12px rgba(0, 94, 162, .16); }
 .tpl-card.active::before { opacity: 1; }
 .tpl-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
-.tpl-name { font-weight: 800; font-size: 15px; color: var(--ink, #1b1b1b); line-height: 1.25; }
+.tpl-name { font-weight: 800; font-size: 15px; color: var(--ink, #1b1b1b); line-height: 1.25; min-width: 0; overflow-wrap: anywhere; }
 .tpl-card.active .tpl-name { color: var(--accent-dark); }
+/* Inline-rename state: the title becomes an editable field in place. */
+.tpl-name.editing {
+  outline: 2px solid var(--accent); border-radius: 5px; background: #fff;
+  padding: 1px 5px; margin: -1px -5px; cursor: text; overflow-wrap: normal;
+}
+.tpl-card[role="button"] { cursor: pointer; }
+.tpl-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tpl-badge {
   flex: 0 0 auto; margin-top: 1px; font-size: 10px; font-weight: 700; letter-spacing: .3px;
   text-transform: uppercase; border-radius: 999px; padding: 3px 10px; white-space: nowrap;
@@ -157,7 +164,66 @@ body {
 }
 .tpl-badge-doc { background: #5a6b82; }
 .tpl-badge-data { background: #8a7a52; }
+.tpl-badge-custom { background: #2e7d5b; }
 .tpl-desc { font-size: 13px; color: var(--muted); line-height: 1.55; }
+
+/* Gallery toggle bar: filters the cards by kind. */
+.tpl-filterbar { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 14px; }
+.tpl-filter {
+  border: 1px solid var(--border-soft); background: #fff; color: var(--muted);
+  border-radius: 999px; padding: 5px 13px; font-size: 12px; font-weight: 600;
+  cursor: pointer; transition: border-color .12s, background .12s, color .12s;
+}
+.tpl-filter:hover { border-color: var(--accent); color: var(--accent-dark); }
+.tpl-filter.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* Hover actions on a saved card (rename + delete). They sit in the bottom-right
+   corner as small chips so they never collide with the kind badge (top-right). */
+.tpl-act {
+  position: absolute; bottom: 11px; width: 24px; height: 24px;
+  display: none; align-items: center; justify-content: center;
+  border: 1px solid var(--border-soft); background: #fff; border-radius: 7px;
+  color: #b6bcc6; font-size: 12px; line-height: 1;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+}
+.tpl-card:hover .tpl-act { display: inline-flex; }
+.tpl-rename { right: 44px; }
+.tpl-rename:hover { background: #eef4fb; border-color: #cfe0f0; color: var(--accent); }
+.tpl-del { right: 12px; }
+.tpl-del:hover { background: #fbe9e9; border-color: #f0c9c9; color: #c0392b; }
+
+.tpl-empty {
+  border: 1.5px dashed #c6cdd7; border-radius: 12px; padding: 22px 18px;
+  font-size: 13px; color: var(--muted); line-height: 1.6; text-align: center;
+}
+
+/* --- save-as-template modal --- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 50; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(20, 30, 45, .45); padding: 20px;
+}
+.modal-overlay[hidden] { display: none; }
+.modal {
+  width: 100%; max-width: 380px; background: #fff; border-radius: 14px;
+  padding: 22px; box-shadow: 0 18px 50px rgba(0, 0, 0, .28);
+}
+.modal-icon {
+  width: 42px; height: 42px; border-radius: 11px; display: flex;
+  align-items: center; justify-content: center; font-size: 20px; margin-bottom: 12px;
+}
+.modal-icon-danger { background: #fbe9e9; }
+.modal-title { font-size: 17px; font-weight: 800; color: var(--ink); margin-bottom: 4px; }
+.modal-sub { font-size: 12.5px; color: var(--muted); line-height: 1.55; margin-bottom: 16px; }
+.modal-err { font-size: 12px; color: #c0392b; font-weight: 600; margin-top: 9px; }
+.btn-danger { background: #c0392b; color: #fff; border-color: #c0392b; font-weight: 700; }
+.btn-danger:hover { background: #a93226; border-color: #a93226; }
+.modal-input {
+  width: 100%; border: 1px solid #dfe3e9; border-radius: 8px; padding: 9px 11px;
+  font-size: 14px; outline: none; box-sizing: border-box;
+}
+.modal-input:focus { border-color: var(--accent); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 /* --- output --- */
 .output-bar { flex: 0 0 auto; border-bottom: 1px solid var(--border-soft); padding: 12px 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 10px; }

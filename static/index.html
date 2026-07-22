@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css?v=5" />
+  <link rel="stylesheet" href="/styles.css?v=6" />
 </head>
 <body>
   <div class="app">
@@ -40,6 +40,8 @@
       <label><span class="hint">Seed</span>
         <input id="seed" type="number" value="42" style="width:78px" />
       </label>
+      <button id="savePreset" class="btn btn-ghost"
+              title="Save the current setup as a reusable template">Save</button>
       <button id="generate" class="btn btn-primary">Generate</button>
     </header>
 
@@ -92,6 +94,36 @@
 
   <div class="toast" id="toast"></div>
 
-  <script src="/app.js?v=5"></script>
+  <!-- Save-as-template modal. Hidden until the Save button opens it. -->
+  <div class="modal-overlay" id="saveModal" hidden>
+    <div class="modal">
+      <div class="modal-title" id="saveModalTitle">Save template</div>
+      <div class="modal-sub" id="saveModalSub"></div>
+      <input id="saveModalName" class="modal-input" maxlength="32"
+             placeholder="Name this template" spellcheck="false" />
+      <div class="modal-err" id="saveModalErr" hidden></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="saveModalCancel">Cancel</button>
+        <button class="btn btn-ghost" id="saveModalCopy" hidden>Save a copy</button>
+        <button class="btn btn-danger" id="saveModalReplace" hidden>Replace</button>
+        <button class="btn btn-primary" id="saveModalOk">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete-confirmation dialog. Opened by the ✕ on a saved card. -->
+  <div class="modal-overlay" id="confirmModal" hidden>
+    <div class="modal">
+      <div class="modal-icon modal-icon-danger">🗑</div>
+      <div class="modal-title">Delete this template?</div>
+      <div class="modal-sub" id="confirmModalSub"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="confirmCancel">Cancel</button>
+        <button class="btn btn-danger" id="confirmOk">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js?v=6"></script>
 </body>
 </html>
