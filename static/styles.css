@@ -5,6 +5,11 @@
  * does) and the whole app recolours. That is what makes the palette
  * customizable without touching any other rule. */
 
+/* The `hidden` attribute must always win. Rules like `.btn { display: … }`
+ * otherwise override the browser default and leave hidden elements visible
+ * (this is why the Replace button showed permanently). Keep this near the top. */
+[hidden] { display: none !important; }
+
 :root {
   /* The two theme colours the picker swaps. Federal Blue by default. */
   --accent: #005ea2;

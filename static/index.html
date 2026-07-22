@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css?v=10" />
+  <link rel="stylesheet" href="/styles.css?v=12" />
 </head>
 <body>
   <div class="app">
@@ -106,6 +106,13 @@
             <button class="pdf-mode" data-pdfmode="docs">Doc</button>
           </div>
           <div class="divider" style="background:#e2e6ec;height:24px"></div>
+          <button id="shareBtn" class="btn btn-ghost"
+                  title="Share this setup as a link (the recipe, not the data)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+                 style="margin-right:5px;vertical-align:-2px">
+              <path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7" /><path d="M16 6l-4-4-4 4" />
+              <path d="M12 2v13" /></svg>Share</button>
           <button id="copy" class="btn btn-ghost">Copy</button>
           <button id="download" class="btn btn-primary">Export</button>
         </div>
@@ -134,9 +141,22 @@
       <div class="modal-err" id="saveModalErr" hidden></div>
       <div class="modal-actions">
         <button class="btn btn-ghost" id="saveModalCancel">Cancel</button>
-        <button class="btn btn-ghost" id="saveModalCopy" hidden>Save a copy</button>
-        <button class="btn btn-danger" id="saveModalReplace" hidden>Replace</button>
+        <button class="btn btn-primary" id="saveModalReplace" hidden>Replace</button>
         <button class="btn btn-primary" id="saveModalOk">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Share-link modal. Opened by the Share button; shows a copyable link that
+       encodes the whole setup in the URL fragment. -->
+  <div class="modal-overlay" id="shareModal" hidden>
+    <div class="modal">
+      <div class="modal-title">Share this setup</div>
+      <div class="modal-sub" id="shareModalSub"></div>
+      <input id="shareModalLink" class="modal-input" readonly spellcheck="false" />
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="shareModalCancel">Close</button>
+        <button class="btn btn-primary" id="shareModalCopy">Copy link</button>
       </div>
     </div>
   </div>
@@ -154,6 +174,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=10"></script>
+  <script src="/app.js?v=12"></script>
 </body>
 </html>
