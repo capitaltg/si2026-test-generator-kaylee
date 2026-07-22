@@ -120,6 +120,13 @@ def guess_type(raw_name, sql_type=None):
     if has("agency", "department", "bureau", "directorate"):
         return "enum"  # GovCon agencies are a small fixed set; opts fill values
 
+    # --- network identifiers BEFORE places, so "ip_address" / "mac_address"
+    #     aren't swallowed by the "address" street rule below ---
+    if has("ip_address", "ip_addr") or word("ip", "ipv4"):
+        return "ipv4"
+    if has("macaddress", "mac_addr", "mac_address") or word("mac"):
+        return "macAddress"
+
     # --- places ---
     if has("street", "address"):
         return "streetAddress"
@@ -141,10 +148,6 @@ def guess_type(raw_name, sql_type=None):
         return "url"
     if has("domain"):
         return "domain"
-    if has("ip_address", "ip_addr") or word("ip", "ipv4"):
-        return "ipv4"
-    if has("macaddress", "mac_addr") or word("mac"):
-        return "macAddress"
     if has("color", "colour"):
         return "color"
     if has("currency"):
@@ -379,44 +382,66 @@ def infer_json_sample(text):
     return _fields_from(pairs)
 
 
-# Plain-English phrase -> (column name, field type). Regex, no AI.
+# Plain-English phrase -> column NAME. Regex, no AI.
+#
+# The field TYPE is deliberately NOT stored here — it's derived by
+# guess_type(name) in _fields_from, exactly like the DDL/CSV/JSON tabs. That
+# makes guess_type the single source of truth: any coverage or accuracy gain
+# there flows to the Describe tab for free, and the two can't drift apart.
+# Each name below is chosen so guess_type lands the intended type
+# (e.g. "is_premium" -> bool, "signup_at" -> datetime, "amount" -> price).
 _DESCRIBE_RULES = [
-    (r"\b(full name|name)\b", "full_name", "fullName"),
-    (r"\bfirst name\b", "first_name", "firstName"),
-    (r"\blast name\b", "last_name", "lastName"),
-    (r"\b(e-?mail)\b", "email", "email"),
-    (r"\b(phone|mobile)\b", "phone", "phone"),
-    (r"\b(address|street)\b", "address", "streetAddress"),
-    (r"\bcity\b", "city", "city"),
-    (r"\bstate\b", "state", "state"),
-    (r"\b(zip|postal)\b", "zip", "zip"),
-    (r"\bcountry\b", "country", "country"),
-    (r"\b(company|organization|employer)\b", "company", "company"),
-    (r"\b(agency|department|bureau)\b", "agency", "enum"),
-    (r"\b(job|title|role|position)\b", "job_title", "jobTitle"),
-    (r"\b(age)\b", "age", "age"),
-    (r"\b(spend|balance|amount|salary|price|revenue|total|cost)\b", "amount", "price"),
-    (r"\b(quantity|count|number of)\b", "quantity", "int"),
-    (r"\b(signup|created|registration|join)\b", "signup_date", "datetime"),
-    (r"\b(birth|dob)\b", "birth_date", "date"),
-    (r"\b(premium|member|active|verified|subscrib)\b", "is_premium", "bool"),
-    (r"\b(status|stage|tier|category)\b", "status", "enum"),
-    (r"\b(username|handle|login)\b", "username", "username"),
-    (r"\b(url|website|link)\b", "website", "url"),
-    (r"\b(product|item)\b", "product", "product"),
-    (r"\b(id|identifier)\b", "id", "uuid"),
+    (r"\bfirst name\b", "first_name"),
+    (r"\blast name\b", "last_name"),
+    (r"\b(full name|name)\b", "full_name"),
+    (r"\b(e-?mail)\b", "email"),
+    (r"\b(phone|mobile)\b", "phone"),
+    (r"\b(username|handle|login)\b", "username"),
+    (r"\b(gender|sex)\b", "gender"),
+    (r"\b(job|title|role|position)\b", "job_title"),
+    (r"\b(company|organization|employer|vendor|contractor)\b", "company"),
+    (r"\b(agency|department|bureau)\b", "agency"),
+    (r"(?<!ip )\b(address|street)\b", "address"),
+    (r"\bcity\b", "city"),
+    (r"\bstate\b", "state"),
+    (r"\b(zip|postal)\b", "zip"),
+    (r"\bcountry\b", "country"),
+    (r"\blatitude\b", "latitude"),
+    (r"\blongitude\b", "longitude"),
+    (r"\b(url|website|link)\b", "website"),
+    (r"\bdomain\b", "domain"),
+    (r"\b(ip address|ip)\b", "ip_address"),
+    (r"\bcolou?r\b", "color"),
+    (r"\bcredit card\b", "credit_card"),
+    (r"\bage\b", "age"),
+    (r"\b(spend|balance|amount|salary|price|revenue|total|cost|budget)\b", "amount"),
+    (r"\b(percent|percentage|ratio|rate)\b", "rate"),
+    (r"\b(score|rating|votes|views)\b", "score"),
+    (r"\b(quantity|count|number of)\b", "quantity"),
+    (r"\b(product|item|sku)\b", "product"),
+    (r"\b(signup|sign up|created|registration|register|join)\b", "signup_at"),
+    (r"\b(birth|dob)\b", "birth_date"),
+    (r"\b(premium|member|active|verified|subscrib)\b", "is_premium"),
+    (r"\b(status|stage|tier|category|priority)\b", "status"),
+    (r"\b(description|comment|note|bio|summary|remarks)\b", "description"),
+    (r"\b(id|identifier)\b", "id"),
 ]
 
 
 def from_description(text):
-    """Build fields from a plain-English description using keyword rules."""
+    """Build fields from a plain-English description using keyword rules.
+
+    Each matched phrase contributes a column NAME; the field type is then
+    derived by guess_type(name) inside _fields_from — the same guesser the
+    DDL/CSV/JSON tabs use — so the Describe tab infers consistently with them.
+    """
     lowered = str(text or "").lower()
-    found, seen = [], set()
-    for pattern, name, field_type in _DESCRIBE_RULES:
-        if re.search(pattern, lowered) and name not in seen:
+    names, seen = [], set()
+    for pattern, name in _DESCRIBE_RULES:
+        if name not in seen and re.search(pattern, lowered):
             seen.add(name)
-            found.append({"name": name, "type": field_type})
+            names.append(name)
     # Always give it an id column, at the front.
-    if not any(f["name"] == "id" for f in found):
-        found.insert(0, {"name": "id", "type": "uuid"})
-    return _fields_from(found)
+    if "id" not in seen:
+        names.insert(0, "id")
+    return _fields_from([{"name": n} for n in names])
