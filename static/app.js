@@ -752,25 +752,111 @@ function describeSnapshot(s) {
   return `${s.fields.length} field${s.fields.length === 1 ? "" : "s"} · seed ${s.seed} · ${s.rowCount} rows`;
 }
 
+// --- share via URL ----------------------------------------------------------
+// The whole setup travels inside the URL fragment (#c=...), so links need no
+// backend and never expire. Fragments aren't sent to the server, so nothing is
+// logged. A GovCon preset shares as a bookmark; the Builder shares in full.
+const SHARE_PREFIX = "#c=";
+
+// Capture the current studio state as a shareable snapshot (restored by
+// applySnapshot, same as a saved template). The Builder payload is slimmed for
+// a shorter link: internal ids are dropped (regenerated on load) and default
+// nullPct/empty opts are omitted. applySnapshot fills those defaults back in.
+function shareSnapshot() {
+  if (state.preset) {
+    return { origin: "preset", base: state.preset, seed: state.seed, rowCount: state.rowCount };
+  }
+  const full = currentTemplateSnapshot();
+  full.fields = full.fields.map((f) => {
+    const lean = { name: f.name, type: f.type };
+    if (f.nullPct) lean.nullPct = f.nullPct;
+    if (f.opts && Object.keys(f.opts).length) lean.opts = f.opts;
+    return lean;
+  });
+  return full;
+}
+
+// A short human summary of what a snapshot carries, for the modal subhead.
+function describeShare(snap) {
+  if (snap.origin === "preset") {
+    const p = state.presets.find((x) => x.key === snap.base);
+    return `GovCon template · ${p ? p.label : snap.base} · seed ${snap.seed}`;
+  }
+  return `Builder · ${snap.fields.length} field${snap.fields.length === 1 ? "" : "s"} · seed ${snap.seed}`;
+}
+
+// JSON -> base64 (UTF-8 safe via encodeURIComponent) and back. decode returns
+// null on anything malformed so a bad/old link can't crash the page.
+function encodeConfig(snap) {
+  return btoa(encodeURIComponent(JSON.stringify(snap)));
+}
+function decodeConfig(encoded) {
+  try {
+    return JSON.parse(decodeURIComponent(atob(encoded)));
+  } catch (e) {
+    return null;
+  }
+}
+
+function buildShareLink(snap) {
+  return location.origin + location.pathname + SHARE_PREFIX + encodeConfig(snap);
+}
+
+function openShareModal() {
+  const snap = shareSnapshot();
+  if (snap.origin === "builder" && !snap.fields.length) {
+    toast("Nothing to share yet — add a field first");
+    return;
+  }
+  $("#shareModalSub").textContent = describeShare(snap);
+  $("#shareModalLink").value = buildShareLink(snap);
+  $("#shareModal").hidden = false;
+  $("#shareModalLink").focus();
+  $("#shareModalLink").select();
+}
+
+function closeShareModal() {
+  $("#shareModal").hidden = true;
+}
+
+async function copyShareLink() {
+  const link = $("#shareModalLink").value;
+  try {
+    await navigator.clipboard.writeText(link);
+    toast("Link copied");
+  } catch (e) {
+    // Clipboard API can be blocked (e.g. non-secure origin); fall back to select.
+    $("#shareModalLink").select();
+    toast("Press ⌘C to copy the selected link");
+  }
+}
+
+// On page load, if the URL carries a shared config, apply it and clean the
+// fragment so a later edit + refresh doesn't silently revert to the link.
+function loadSharedConfig() {
+  if (!location.hash.startsWith(SHARE_PREFIX)) return false;
+  const snap = decodeConfig(location.hash.slice(SHARE_PREFIX.length));
+  history.replaceState(null, "", location.pathname + location.search);
+  if (!snap) {
+    toast("Couldn't read that shared link");
+    return false;
+  }
+  applySnapshot(snap);
+  toast("Loaded shared setup");
+  return true;
+}
+
 // The saved template whose name matches `name` (case-insensitive), or null.
 function templateByName(name) {
   const n = name.trim().toLowerCase();
   return state.custom.find((c) => c.label.trim().toLowerCase() === n) || null;
 }
 
-// True if any OTHER template uses this name — used to keep inline renames and
-// "Save a copy" from producing duplicates.
+// True if any OTHER template uses this name — used to reject inline renames
+// that would collide with an existing template.
 function nameTaken(name, exceptKey) {
   const clash = templateByName(name);
   return !!clash && clash.key !== exceptKey;
-}
-
-// Derive a free name from a base by appending " (2)", " (3)", … as needed.
-function uniqueName(base) {
-  let name = base;
-  let i = 2;
-  while (nameTaken(name, null)) name = `${base} (${i++})`;
-  return name;
 }
 
 function showModalError(msg) {
@@ -792,7 +878,6 @@ function loadedTemplate() {
 // Return the modal to its normal (non-conflict) state: just Cancel + Save.
 function resetSaveConflict() {
   pendingClash = null;
-  $("#saveModalCopy").hidden = true;
   $("#saveModalReplace").hidden = true;
   $("#saveModalOk").hidden = false;
   clearModalError();
@@ -865,11 +950,11 @@ function attemptSave() {
   const clash = templateByName(name);
   if (!clash) return createTemplate(name); // free name → new template
   if (clash.key === state.loadedTemplateKey) return overwriteTemplate(clash, name); // saving over the one you loaded
-  // Name belongs to a different template — ask before clobbering it.
+  // Name belongs to a different template — confirm before clobbering it, the
+  // way a desktop "Save As" asks to replace an existing file.
   pendingClash = clash;
-  showModalError('A template named "' + name + '" already exists.');
+  showModalError('A template named "' + name + '" already exists. Replace it?');
   $("#saveModalOk").hidden = true;
-  $("#saveModalCopy").hidden = false;
   $("#saveModalReplace").hidden = false;
 }
 
@@ -930,26 +1015,30 @@ function startInlineRename(cardEl, key) {
 }
 
 // Rehydrate the studio from a saved custom template and regenerate.
-function restoreCustomTemplate(key) {
-  const t = state.custom.find((c) => c.key === key);
-  if (!t) return;
-  state.seed = t.seed;
-  state.rowCount = t.rowCount;
-  $("#seed").value = t.seed;
+// Apply a studio snapshot (from a saved template or a shared link) into state,
+// then render + regenerate. Handles both origins: a GovCon preset bookmark and
+// a full Builder setup. Does NOT touch loadedTemplateKey — the caller owns that,
+// since a shared link isn't a saved template but a restored one is.
+function applySnapshot(snap) {
+  state.seed = snap.seed;
+  state.rowCount = snap.rowCount;
+  $("#seed").value = snap.seed;
 
-  if (t.origin === "preset") {
-    // A bookmark onto a GovCon preset: selectPreset renders + regenerates.
-    selectPreset(t.base);
+  if (snap.origin === "preset") {
+    // A bookmark onto a GovCon preset: show the gallery and let selectPreset
+    // render + regenerate (it also clears any loaded-template context).
+    state.inputTab = "templates";
+    renderInputTabs();
+    selectPreset(snap.base);
     return;
   }
 
   // Builder setup: leave preset mode and rebuild the field cards with fresh ids.
   state.preset = null;
   state.presetKind = null;
-  state.loadedTemplateKey = key; // mark it loaded so edits can Update it
-  state.tableName = t.table || "users";
+  state.tableName = snap.table || "users";
   $("#tableName").value = state.tableName;
-  state.fields = (t.fields || []).map((f) => ({
+  state.fields = (snap.fields || []).map((f) => ({
     id: uid(),
     name: f.name,
     type: f.type,
@@ -957,11 +1046,11 @@ function restoreCustomTemplate(key) {
     opts: Object.assign({}, f.opts),
   }));
 
-  const theme = t.theme || "Federal Blue";
+  const theme = snap.theme || "Federal Blue";
   $("#theme").value = theme;
   if (theme === "Custom") {
     $("#customColorRow").style.display = "";
-    if (t.customColor) $("#customColor").value = t.customColor;
+    if (snap.customColor) $("#customColor").value = snap.customColor;
     applyCustom($("#customColor").value);
   } else {
     $("#customColorRow").style.display = "none";
@@ -973,6 +1062,15 @@ function restoreCustomTemplate(key) {
   renderInputPanel();
   renderOutputTabs();
   generate();
+}
+
+function restoreCustomTemplate(key) {
+  const t = state.custom.find((c) => c.key === key);
+  if (!t) return;
+  // A restored Builder template stays "loaded" so edits can Update it; a preset
+  // bookmark doesn't (selectPreset clears loadedTemplateKey anyway).
+  state.loadedTemplateKey = t.origin === "preset" ? null : key;
+  applySnapshot(t);
 }
 
 let pendingDeleteKey = null; // saved-template key awaiting delete confirmation
@@ -1193,13 +1291,17 @@ function wireEvents() {
   // Save-as-template: open the modal, save on OK/Enter. When the name collides
   // with another template, Replace/Save-a-copy appear; editing the name returns
   // to the normal state.
+  $("#shareBtn").addEventListener("click", openShareModal);
+  $("#shareModalCopy").addEventListener("click", copyShareLink);
+  $("#shareModalCancel").addEventListener("click", closeShareModal);
+  $("#shareModal").addEventListener("click", (e) => {
+    if (e.target.id === "shareModal") closeShareModal();
+  });
+
   $("#savePreset").addEventListener("click", openSaveModal);
   $("#saveModalOk").addEventListener("click", attemptSave);
   $("#saveModalReplace").addEventListener("click", () => {
     if (pendingClash) overwriteTemplate(pendingClash, $("#saveModalName").value.trim());
-  });
-  $("#saveModalCopy").addEventListener("click", () => {
-    createTemplate(uniqueName($("#saveModalName").value.trim()));
   });
   $("#saveModalCancel").addEventListener("click", closeSaveModal);
   $("#saveModalName").addEventListener("input", resetSaveConflict);
@@ -1227,6 +1329,7 @@ function wireEvents() {
     if (e.key === "Escape") {
       if (!$("#saveModal").hidden) closeSaveModal();
       if (!$("#confirmModal").hidden) closeConfirmModal();
+      if (!$("#shareModal").hidden) closeShareModal();
     } else if (e.key === "Enter" && !$("#confirmModal").hidden) {
       commitDelete();
     }
@@ -1500,10 +1603,13 @@ async function init() {
   ];
 
   wireEvents();
-  renderInputTabs();
-  renderInputPanel();
-  renderOutputTabs();
-  generate();
+  // A shared link (#c=...) overrides the default schema and renders itself.
+  if (!loadSharedConfig()) {
+    renderInputTabs();
+    renderInputPanel();
+    renderOutputTabs();
+    generate();
+  }
 }
 
 init();
