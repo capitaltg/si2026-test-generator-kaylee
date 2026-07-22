@@ -31,6 +31,8 @@ const state = {
   labels: {}, // type -> human label, for the table header
   rows: [], // last generated preview rows
   exportCache: {}, // format -> text, cleared on each generate
+  sources: {}, // input-tab mode -> pasted text (ddl | csv | json | describe)
+  sourceMsg: {}, // input-tab mode -> {ok, text} status line under the button
 };
 
 const PREVIEW_CAP = 200; // never render more than this many rows on screen
@@ -201,6 +203,140 @@ function fieldCardHtml(field) {
   );
 }
 
+// The four "bring your own schema" input tabs. Each pastes some artifact, hits
+// its P3 endpoint (testgen/infer.py), and generates in place: the inferred
+// schema loads into the builder's field list and the shared output pane on the
+// right fills immediately — the user never has to leave the tab. `key` is the
+// request-body field each endpoint expects.
+const SOURCE_TABS = {
+  ddl: {
+    endpoint: "/schema/from-ddl",
+    key: "ddl",
+    button: "Generate from DDL",
+    intro:
+      "Paste a <code>CREATE TABLE</code> statement — Fixtura reads the columns and generates matching data.",
+    placeholder:
+      "CREATE TABLE contracts (\n  id INT PRIMARY KEY,\n  vendor VARCHAR(120),\n  amount DECIMAL(12,2),\n  awarded_at TIMESTAMP\n);",
+  },
+  describe: {
+    endpoint: "/schema/from-description",
+    key: "text",
+    button: "Generate from description",
+    intro:
+      "Describe the data in plain English. Fixtura matches keywords to field types (no AI).",
+    placeholder: "Customers with name, email, phone, company, and signup date",
+    examples: [
+      { label: "Customers", text: "Customers with full name, email, phone, company, and signup date" },
+      { label: "Invoices", text: "Invoices with id, amount, status, and created date" },
+      { label: "Employees", text: "Employees with name, job title, salary, and birth date" },
+    ],
+  },
+  csv: {
+    endpoint: "/schema/from-csv",
+    key: "csv",
+    button: "Generate from CSV",
+    intro:
+      "Drop a <b>.csv</b> file here, or paste its header row. Only the headers are read to infer the schema.",
+    placeholder: "id,full_name,email,company,amount,status",
+  },
+  json: {
+    endpoint: "/schema/from-json",
+    key: "sample",
+    button: "Generate from JSON",
+    intro: "Paste a sample JSON object (or an array — the first item is used).",
+    placeholder: '{\n  "id": 1,\n  "email": "vendor@example.com",\n  "amount": 12000.50\n}',
+  },
+};
+
+// A flat inferred field ({name, type, ...options}) -> the builder's opts bag
+// (everything that isn't a reserved key). Lets inferred schemas drop straight
+// into state.fields alongside hand-built ones.
+function fieldOpts(f) {
+  const opts = {};
+  for (const [k, v] of Object.entries(f)) {
+    if (k === "name" || k === "type" || k === "null_pct") continue;
+    opts[k] = v;
+  }
+  return opts;
+}
+
+function sourcePanelHtml(mode) {
+  const cfg = SOURCE_TABS[mode];
+  if (!cfg) return "";
+  const text = escapeHtml(state.sources[mode] || "");
+  const chips = cfg.examples
+    ? `<div class="src-chips"><span class="src-chips-lbl">Try:</span>` +
+      cfg.examples
+        .map((ex, i) => `<button class="src-chip" data-example="${i}">${escapeHtml(ex.label)}</button>`)
+        .join("") +
+      `</div>`
+    : "";
+  const msg = state.sourceMsg[mode];
+  const note = msg
+    ? `<div class="src-note ${msg.ok ? "src-ok" : "src-err"}">${escapeHtml(msg.text)}</div>`
+    : "";
+  return (
+    `<div class="src-panel"${mode === "csv" ? ' data-drop="1"' : ""}>` +
+    `<div class="src-intro">${cfg.intro}</div>` +
+    chips +
+    `<textarea class="src-input" data-src="${mode}" spellcheck="false" ` +
+    `placeholder="${escapeHtml(cfg.placeholder)}">${text}</textarea>` +
+    `<button class="btn btn-primary src-go" data-src-go="${mode}">${cfg.button}</button>` +
+    note +
+    `</div>`
+  );
+}
+
+// Infer a schema from a source tab, load it into the builder, and generate.
+async function inferAndGenerate(mode) {
+  const cfg = SOURCE_TABS[mode];
+  const text = (state.sources[mode] || "").trim();
+  if (!text) {
+    state.sourceMsg[mode] = { ok: false, text: "Paste something first." };
+    renderInputPanel();
+    return;
+  }
+  let fields, table;
+  try {
+    const data = await (await postJSON(cfg.endpoint, { [cfg.key]: text })).json();
+    fields = data.fields || [];
+    table = data.table;
+  } catch (e) {
+    state.sourceMsg[mode] = { ok: false, text: e.message };
+    renderInputPanel();
+    return;
+  }
+  if (!fields.length) {
+    state.sourceMsg[mode] = { ok: false, text: "No fields could be inferred." };
+    renderInputPanel();
+    return;
+  }
+  // Load the inferred schema into the builder's field list, then generate the
+  // normal (non-preset) way so the shared output pane renders it.
+  state.fields = fields.map((f) => ({
+    id: uid(),
+    name: f.name,
+    type: f.type,
+    nullPct: f.null_pct || 0,
+    opts: fieldOpts(f),
+  }));
+  state.preset = null;
+  state.presetKind = null;
+  state.loadedTemplateKey = null;
+  if (mode === "ddl" && table) {
+    state.tableName = table;
+    $("#tableName").value = table;
+  }
+  const n = fields.length;
+  state.sourceMsg[mode] = {
+    ok: true,
+    text: `Detected ${n} field${n === 1 ? "" : "s"} — switch to Builder to fine-tune.`,
+  };
+  renderOutputTabs();
+  renderInputPanel();
+  await generate();
+}
+
 function renderInputTabs() {
   const tabs = ["builder", "templates", "ddl", "describe", "csv", "json"];
   const labels = { builder: "Builder", templates: "Templates", ddl: "DDL", describe: "Describe", csv: "CSV", json: "JSON" };
@@ -274,7 +410,7 @@ function renderInputPanel() {
     return;
   }
   if (state.inputTab !== "builder") {
-    panel.innerHTML = `<div class="placeholder">The <b>${state.inputTab.toUpperCase()}</b> input method arrives in the next update (Phase 5). Use <b>Builder</b> for now.</div>`;
+    panel.innerHTML = sourcePanelHtml(state.inputTab);
     return;
   }
   panel.innerHTML =
@@ -824,11 +960,11 @@ function restoreCustomTemplate(key) {
   const theme = t.theme || "Federal Blue";
   $("#theme").value = theme;
   if (theme === "Custom") {
-    $("#customColor").style.display = "";
+    $("#customColorRow").style.display = "";
     if (t.customColor) $("#customColor").value = t.customColor;
     applyCustom($("#customColor").value);
   } else {
-    $("#customColor").style.display = "none";
+    $("#customColorRow").style.display = "none";
     applyAccent(...ACCENTS[theme]);
   }
 
@@ -874,20 +1010,23 @@ async function generate() {
   // both produce rows we render through the format tabs.
   if (state.preset && state.presetKind !== "data") return generatePreset(total);
   try {
+    const started = performance.now();
     const body = state.preset
       ? presetReqBody(Math.min(total, PREVIEW_CAP))
       : { fields: buildFields(), rows: Math.min(total, PREVIEW_CAP), seed: state.seed };
     const resp = await postJSON("/generate", body);
     state.rows = (await resp.json()).rows;
+    $("#statMs").textContent = ` · generated in ${Math.round(performance.now() - started)} ms`;
   } catch (e) {
     state.rows = [];
+    $("#statMs").textContent = "";
     toast("Could not generate: " + e.message);
   }
   $("#statRows").textContent =
     total.toLocaleString() + (state.preset ? " records" : " rows");
   $("#statNote").textContent =
     total > PREVIEW_CAP
-      ? `Showing first ${PREVIEW_CAP} of ${total.toLocaleString()} — export for the full set`
+      ? ` · Showing first ${PREVIEW_CAP} of ${total.toLocaleString()} — export for the full set`
       : "";
   renderOutput();
 }
@@ -898,6 +1037,7 @@ async function generatePreset(total) {
   const body = $("#outputBody");
   $("#statRows").textContent = total.toLocaleString() + " docs";
   $("#statNote").textContent = "";
+  $("#statMs").textContent = ""; // form/doc presets aren't timed row generations
   body.innerHTML =
     `<div class="pdf-pane"><div class="pdf-controls"><div class="pdf-hint">` +
     `Filled real form — one copy per record, each with generated, reconciling data. ` +
@@ -1039,7 +1179,14 @@ async function copyOutput() {
 // --- events ----------------------------------------------------------------
 
 function wireEvents() {
-  $("#generate").addEventListener("click", generate);
+  $("#generate").addEventListener("click", () => {
+    // One-shot "roll" spin on the die icon; re-trigger by restarting the anim.
+    const g = $("#generate");
+    g.classList.remove("rolling");
+    void g.offsetWidth; // force reflow so the animation restarts on rapid clicks
+    g.classList.add("rolling");
+    generate();
+  });
   $("#download").addEventListener("click", download);
   $("#copy").addEventListener("click", copyOutput);
 
@@ -1147,7 +1294,7 @@ function wireEvents() {
 
   $("#theme").addEventListener("change", (e) => {
     const name = e.target.value;
-    $("#customColor").style.display = name === "Custom" ? "" : "none";
+    $("#customColorRow").style.display = name === "Custom" ? "" : "none";
     if (name === "Custom") {
       applyCustom($("#customColor").value);
     } else {
@@ -1155,6 +1302,33 @@ function wireEvents() {
     }
   });
   $("#customColor").addEventListener("input", (e) => applyCustom(e.target.value));
+  $("#density").addEventListener("change", (e) => {
+    document.documentElement.dataset.density = e.target.value;
+  });
+
+  // Appearance settings popover: toggle on the gear, dismiss on outside click
+  // or Escape.
+  const settingsBtn = $("#settingsBtn");
+  const settingsMenu = $("#settingsMenu");
+  const closeSettings = () => {
+    settingsMenu.hidden = true;
+    settingsBtn.setAttribute("aria-expanded", "false");
+  };
+  settingsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const opening = settingsMenu.hidden;
+    settingsMenu.hidden = !opening;
+    settingsBtn.setAttribute("aria-expanded", String(opening));
+  });
+  document.addEventListener("click", (e) => {
+    if (!settingsMenu.hidden && !e.target.closest(".settings-wrap")) closeSettings();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !settingsMenu.hidden) {
+      closeSettings();
+      settingsBtn.focus();
+    }
+  });
 
   $("#outputTabs").addEventListener("click", (e) => {
     const b = e.target.closest("[data-otab]");
@@ -1183,6 +1357,10 @@ function wireEvents() {
   const panel = $("#inputPanel");
   panel.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.dataset.src) {
+      state.sources[el.dataset.src] = el.value; // remember pasted input across tab switches
+      return;
+    }
     const field = state.fields.find((f) => f.id === el.dataset.id);
     if (!field) return;
     if (el.dataset.role === "name") field.name = el.value;
@@ -1215,6 +1393,18 @@ function wireEvents() {
     const del = e.target.closest("[data-del]");
     if (del) {
       deleteCustomTemplate(del.dataset.del);
+      return;
+    }
+    // Source tabs: the Generate button, and Describe's example chips.
+    const go = e.target.closest("[data-src-go]");
+    if (go) {
+      inferAndGenerate(go.dataset.srcGo);
+      return;
+    }
+    const ex = e.target.closest("[data-example]");
+    if (ex) {
+      state.sources.describe = SOURCE_TABS.describe.examples[Number(ex.dataset.example)].text;
+      renderInputPanel();
       return;
     }
     // Gallery toggle bar.
@@ -1251,6 +1441,34 @@ function wireEvents() {
       e.preventDefault();
       restoreCustomTemplate(card.dataset.preset);
     }
+  });
+
+  // CSV drag-drop: dropping a .csv reads its text and generates from it. The
+  // whole panel is delegated to since the CSV panel re-renders on each infer.
+  panel.addEventListener("dragover", (e) => {
+    const zone = e.target.closest("[data-drop]");
+    if (!zone) return;
+    e.preventDefault();
+    zone.classList.add("src-drop-over");
+  });
+  panel.addEventListener("dragleave", (e) => {
+    const zone = e.target.closest("[data-drop]");
+    if (zone && !zone.contains(e.relatedTarget)) zone.classList.remove("src-drop-over");
+  });
+  panel.addEventListener("drop", (e) => {
+    const zone = e.target.closest("[data-drop]");
+    if (!zone) return;
+    e.preventDefault();
+    zone.classList.remove("src-drop-over");
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      state.sources.csv = String(reader.result || "");
+      renderInputPanel();
+      inferAndGenerate("csv");
+    };
+    reader.readAsText(file);
   });
 }
 
