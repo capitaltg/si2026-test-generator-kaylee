@@ -378,3 +378,42 @@ def test_from_description_finds_fields_and_adds_id():
     types = {field["type"] for field in fields}
     assert "price" in types  # "spend" -> price
     assert len(generate(fields, rows=2, seed=1)) == 2
+
+
+def test_from_description_types_come_from_guess_type():
+    # The Describe path stores only column NAMES; every type must be exactly
+    # what guess_type(name) returns, so it can never drift from the other tabs.
+    fields = from_description(
+        "gender, username, website, ip address, signup date, a short bio, "
+        "status, rating, and lifetime spend"
+    )
+    for field in fields:
+        assert field["type"] == guess_type(field["name"]), field["name"]
+
+
+def test_from_description_id_is_int_like_other_tabs():
+    # Parity change: a bare id resolves to int everywhere, so Describe matches
+    # (it used to hard-code uuid).
+    fields = from_description("just an id")
+    id_field = next(f for f in fields if f["name"] == "id")
+    assert id_field["type"] == "int"
+    assert guess_type("id") == "int"
+
+
+def test_from_description_ip_address_is_single_ipv4_column():
+    # "ip address" must yield ONE ipv4 column, not an ipv4 plus a spurious
+    # street "address" column.
+    fields = from_description("a record with an ip address")
+    by_name = {f["name"]: f["type"] for f in fields}
+    assert by_name.get("ip_address") == "ipv4"
+    assert "address" not in by_name
+
+
+def test_guess_type_network_ids_not_swallowed_by_address_rule():
+    # Latent guess_type bug (affects DDL/CSV/JSON too): the "address" substring
+    # rule used to mis-type these as streetAddress.
+    assert guess_type("ip_address") == "ipv4"
+    assert guess_type("mac_address") == "macAddress"
+    # ...without regressing genuine address/zip columns.
+    assert guess_type("street_address") == "streetAddress"
+    assert guess_type("zip") == "zip"
