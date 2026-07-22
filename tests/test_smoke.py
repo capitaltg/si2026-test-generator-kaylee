@@ -232,6 +232,61 @@ def test_cli_sqlite_without_out_is_an_error():
         main(["--format", "sqlite"])
 
 
+# --- GovCon identifier field types -------------------------------------------
+
+GOVCON_SCHEMA = [
+    {"name": "entity_uei", "type": "uei"},
+    {"name": "cage", "type": "cageCode"},
+    {"name": "naics", "type": "naics"},
+    {"name": "psc", "type": "psc"},
+    {"name": "contract", "type": "piid"},
+]
+
+
+def test_govcon_identifiers_generate_valid_shapes():
+    rows = generate(GOVCON_SCHEMA, rows=25, seed=7)
+    for r in rows:
+        # A real UEI is 12 chars and excludes I and O.
+        assert len(r["entity_uei"]) == 12
+        assert not (set("IO") & set(r["entity_uei"]))
+        assert len(r["cage"]) == 5 and r["cage"].isalnum()
+        assert re.fullmatch(r"\d{6}", r["naics"])
+        assert r["psc"] and r["contract"]
+
+
+def test_govcon_naics_and_psc_come_from_the_reference_pools():
+    from testgen.fields import _NAICS, _PSC
+
+    naics_codes = {c for c, *_ in _NAICS}
+    psc_codes = {c for c, *_ in _PSC}
+    rows = generate(GOVCON_SCHEMA, rows=50, seed=3)
+    assert all(r["naics"] in naics_codes for r in rows)
+    assert all(r["psc"] in psc_codes for r in rows)
+
+
+def test_govcon_identifiers_are_reproducible():
+    assert generate(GOVCON_SCHEMA, rows=10, seed=11) == generate(
+        GOVCON_SCHEMA, rows=10, seed=11
+    )
+
+
+def test_govcon_group_is_in_the_dropdown_menu():
+    groups = dict(field_type_groups())
+    assert "GovCon" in groups
+    keys = {k for k, _label in groups["GovCon"]}
+    assert keys == {"uei", "cageCode", "naics", "psc", "piid"}
+
+
+def test_guess_type_recognizes_govcon_columns():
+    assert guess_type("entity_uei") == "uei"
+    assert guess_type("cage_code") == "cageCode"
+    assert guess_type("naics_code") == "naics"
+    assert guess_type("psc") == "psc"
+    assert guess_type("product_service_code") == "psc"
+    assert guess_type("piid") == "piid"
+    assert guess_type("contract_piid") == "piid"
+
+
 # --- Fixtura P1: expanded types, grouped metadata, null % --------------------
 
 

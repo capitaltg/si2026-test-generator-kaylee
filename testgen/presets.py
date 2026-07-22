@@ -30,6 +30,8 @@ from __future__ import annotations
 import datetime
 import string
 
+from .fields import _NAICS, gen_alnum as _alnum, gen_uei as _uei
+
 from faker import Faker
 
 # The AcroForm field names on the real forms are all nested under this prefix.
@@ -135,19 +137,8 @@ _CDRLS = [
 # Services NAICS codes with their 2026 SBA size standard (receipts-based unless
 # noted). Used to fill SF-1449 block 5a/5b — the boxes a reviewer expects on any
 # commercial-items acquisition.
-_NAICS = [
-    ("541511", "Custom Computer Programming Services", "$34.0M"),
-    ("541512", "Computer Systems Design Services", "$34.0M"),
-    ("541519", "Other Computer Related Services", "$34.0M"),
-    ("541330", "Engineering Services", "$25.5M"),
-    ("541611", "Administrative Management and General Management Consulting", "$24.5M"),
-    (
-        "541712",
-        "Research and Development in the Physical, Engineering and Life Sciences",
-        "1,000 employees",
-    ),
-    ("561210", "Facilities Support Services", "$47.0M"),
-]
+# _NAICS lives in fields.py (shared with the NAICS Builder field type); imported
+# above as the single source of truth. Each entry is (code, description, size).
 
 # Set-aside category and the SF-1449 block-10 checkbox(es) it lights up. The
 # on-state for every one of these boxes is "/1". "Unrestricted" checks the lone
@@ -168,26 +159,8 @@ _SET_ASIDE_WEIGHTS = [4, 4, 1, 1, 1, 1]
 
 
 # --- Small helpers ------------------------------------------------------------
-
-
-def _alnum(rng, n):
-    """An n-char uppercase alphanumeric token (CAGE style)."""
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(rng.choice(alphabet) for _ in range(n))
-
-
-# A real UEI (Unique Entity Identifier) is exactly 12 chars and excludes the
-# letters I and O (to avoid confusion with the digits 1 and 0). It also never
-# starts with a 0. We honor those rules so the id passes a validator.
-_UEI_ALPHABET = (
-    "".join(c for c in string.ascii_uppercase if c not in "IO") + string.digits
-)
-
-
-def _uei(rng):
-    first = rng.choice([c for c in _UEI_ALPHABET if c != "0"])
-    rest = "".join(rng.choice(_UEI_ALPHABET) for _ in range(11))
-    return first + rest
+# _uei / _alnum (CAGE) live in fields.py so presets and the Builder mint these
+# identifiers identically; imported above.
 
 
 def _round_money(value):
