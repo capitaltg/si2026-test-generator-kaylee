@@ -127,6 +127,18 @@ def guess_type(raw_name, sql_type=None):
     if has("macaddress", "mac_addr", "mac_address") or word("mac"):
         return "macAddress"
 
+    # --- GovCon identifiers (distinctive tokens; safe this early) ---
+    if word("uei") or has("unique_entity"):
+        return "uei"
+    if has("cage"):
+        return "cageCode"
+    if has("naics"):
+        return "naics"
+    if word("psc") or has("product_service", "product_service_code"):
+        return "psc"
+    if has("piid"):
+        return "piid"
+
     # --- places ---
     if has("street", "address"):
         return "streetAddress"

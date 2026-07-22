@@ -18,6 +18,7 @@ to the FIELD_TYPES dict at the bottom. Nothing else needs to change.
 from __future__ import annotations
 
 import datetime
+import string
 
 
 def _name(field, index, rng, faker):
@@ -315,6 +316,129 @@ def _time(field, index, rng, faker):
 
 # The registry: type name -> the function that generates it. This is the whole
 # menu of field types the tool currently understands, grouped for readability.
+# --- GovCon identifiers -------------------------------------------------------
+# These generators (and their reference data) are the single source of truth for
+# GovCon identifiers across the whole tool: the Builder field types below AND the
+# GovCon presets, which import the rng-only helpers so a preset contract and a
+# hand-built schema mint identifiers the same way.
+
+# A real UEI (Unique Entity Identifier) is exactly 12 chars, excludes the letters
+# I and O (to avoid confusion with 1 and 0), and never starts with 0.
+_UEI_ALPHABET = (
+    "".join(c for c in string.ascii_uppercase if c not in "IO") + string.digits
+)
+
+# (code, description, small-business size standard) — a small, realistic slice of
+# the NAICS codes common on professional-services contracts.
+_NAICS = [
+    ("541511", "Custom Computer Programming Services", "$34.0M"),
+    ("541512", "Computer Systems Design Services", "$34.0M"),
+    ("541519", "Other Computer Related Services", "$34.0M"),
+    ("541330", "Engineering Services", "$25.5M"),
+    ("541611", "Administrative Management and General Management Consulting", "$24.5M"),
+    (
+        "541712",
+        "Research and Development in the Physical, Engineering and Life Sciences",
+        "1,000 employees",
+    ),
+    ("561210", "Facilities Support Services", "$47.0M"),
+]
+
+# (code, description) Product/Service Codes — the "what is being bought" taxonomy.
+# A mix of service (letter-led) and product (digit-led) codes across the areas a
+# GovCon dataset actually touches; wider than a token list so generated data has
+# real variety.
+_PSC = [
+    ("R425", "Support - Professional: Engineering/Technical"),
+    ("R408", "Support - Professional: Program Management/Support"),
+    ("R499", "Support - Professional: Other"),
+    ("R707", "Support - Management: Contract/Procurement/Acquisition"),
+    ("R706", "Support - Management: Logistics Support"),
+    ("B505", "Special Studies/Analysis - Cost Benefit"),
+    ("B506", "Special Studies/Analysis - Data (Other Than Scientific)"),
+    ("D307", "IT and Telecom - IT Systems Development Services"),
+    ("D302", "IT and Telecom - Systems Analysis Services"),
+    ("D310", "IT and Telecom - Cyber Security and Data Backup"),
+    ("D316", "IT and Telecom - Telecommunications Network Management"),
+    ("D399", "IT and Telecom - Other IT and Telecommunications"),
+    ("DA01", "IT and Telecom - Business Application/Software"),
+    ("DE02", "IT and Telecom - Systems Development Support"),
+    ("AR11", "R&D - Space: Applied Research/Exploratory Development"),
+    ("AJ11", "R&D - General Science/Technology: Applied Research"),
+    ("U008", "Education/Training - Training/Curriculum Development"),
+    ("U099", "Education/Training - Other"),
+    ("H170", "Quality Control - Inspection: ADP Equipment/Software"),
+    ("J070", "Maintenance/Repair - ADP Equipment/Software"),
+    ("7010", "ADP System Configuration"),
+    ("7021", "ADP Central Processing Units (CPU)"),
+    ("7025", "ADP Input/Output and Storage Devices"),
+    ("7030", "ADP Software"),
+    ("7035", "ADP Support Equipment"),
+    ("5810", "Communications Security Equipment and Components"),
+    ("5820", "Radio and Television Communication Equipment"),
+    ("5895", "Miscellaneous Communication Equipment"),
+    ("5998", "Electrical and Electronic Assemblies, Boards, Cards"),
+    ("6110", "Electrical Control Equipment"),
+    ("5985", "Antennas, Waveguides, and Related Equipment"),
+    ("7050", "ADP Components"),
+    ("R413", "Support - Professional: Specifications Development"),
+    ("R410", "Support - Professional: Program Evaluation/Review/Development"),
+    ("D306", "IT and Telecom - Data Centers and Storage"),
+    ("R497", "Support - Professional: Personal Services Contracts"),
+]
+
+# PIID (contract/award number) shapes across a few common issuing patterns.
+# `#`=digit, `?`=uppercase letter (via faker.bothify). A standalone PIID is a
+# plausible-looking number; the internally-coherent, agency-matched PIID comes
+# from the GovCon presets.
+_PIID_PATTERNS = [
+    "FA####-##-?-####",
+    "W##Q??-##-D-####",
+    "N#####-##-C-####",
+    "HSHQDC-##-?-#####",
+    "47QTC?##D####",
+    "GS-##F-####?",
+]
+
+
+def gen_uei(rng):
+    """A syntactically valid 12-char UEI."""
+    first = rng.choice([c for c in _UEI_ALPHABET if c != "0"])
+    rest = "".join(rng.choice(_UEI_ALPHABET) for _ in range(11))
+    return first + rest
+
+
+def gen_alnum(rng, n):
+    """An n-char uppercase alphanumeric token (CAGE style)."""
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(rng.choice(alphabet) for _ in range(n))
+
+
+def _uei(field, index, rng, faker):
+    return gen_uei(rng)
+
+
+def _cage_code(field, index, rng, faker):
+    """A 5-char CAGE (Commercial and Government Entity) code."""
+    return gen_alnum(rng, 5)
+
+
+def _naics(field, index, rng, faker):
+    """A 6-digit NAICS industry code."""
+    return rng.choice(_NAICS)[0]
+
+
+def _psc(field, index, rng, faker):
+    """A 4-char Product/Service Code."""
+    return rng.choice(_PSC)[0]
+
+
+def _piid(field, index, rng, faker):
+    """A plausible contract/award number (PIID)."""
+    pattern = rng.choice(_PIID_PATTERNS)
+    return faker.bothify(text=pattern, letters=string.ascii_uppercase)
+
+
 FIELD_TYPES = {
     # people
     "name": _name,
@@ -379,6 +503,13 @@ FIELD_TYPES = {
     "autoIncrement": _sequence,
     "price": _money,
     "enum": _choice,
+    # --- GovCon identifiers ---
+    "uei": _uei,
+    "cageCode": _cage_code,
+    "cage_code": _cage_code,
+    "naics": _naics,
+    "psc": _psc,
+    "piid": _piid,
     # nested: a field whose value is a list of child records (e.g. CLIN line
     # items). Used by document presets; aliases cover the likely spellings.
     "list": _list,
@@ -474,6 +605,16 @@ FIELD_TYPE_GROUPS = [
     ),
     ("Numbers", [("int", "Integer"), ("float", "Float"), ("bool", "Boolean")]),
     ("Dates", [("date", "Date"), ("datetime", "Datetime"), ("time", "Time")]),
+    (
+        "GovCon",
+        [
+            ("uei", "UEI"),
+            ("cageCode", "CAGE code"),
+            ("naics", "NAICS code"),
+            ("psc", "PSC (product/service)"),
+            ("piid", "PIID (contract no.)"),
+        ],
+    ),
     (
         "Text",
         [
