@@ -57,6 +57,23 @@ from testgen.infer import (
 app = FastAPI(title="Fixtura API", version="0.1.0")
 
 
+@app.middleware("http")
+async def _revalidate_html(request, call_next):
+    """Never let the browser serve the HTML entry document stale from cache.
+
+    StaticFiles sends only Last-Modified/ETag (no Cache-Control), so browsers
+    apply heuristic caching and can render an old index.html on a normal
+    reload — which means front-end changes and cache-busted asset links (the
+    ``?v=`` on styles/app/favicon) silently never reach the parser. Forcing
+    ``no-cache`` on HTML makes the browser revalidate every load. Versioned
+    static assets are unaffected and keep whatever caching StaticFiles gives.
+    """
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 # --- Request shapes ----------------------------------------------------------
 
 
