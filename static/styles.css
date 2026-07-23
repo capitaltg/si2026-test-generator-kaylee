@@ -282,7 +282,7 @@ body {
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 /* --- output --- */
-.output-bar { flex: 0 0 auto; border-bottom: 1px solid var(--border-soft); padding: 12px 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; row-gap: 10px; }
+.output-bar { flex: 0 0 auto; border-bottom: 1px solid var(--border-soft); padding: 12px 18px; display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; }
 .rows-ctrl { display: flex; align-items: center; gap: 6px; }
 .rows-ctrl .lbl { font-size: 11.5px; color: var(--faint); font-weight: 600; margin-right: 3px; }
 .rows-ctrl select { border: 1px solid #dfe3e9; border-radius: 6px; padding: 5px 9px; font-family: var(--mono); font-size: 12.5px; background: #fff; color: var(--ink); outline: none; cursor: pointer; }
