@@ -298,10 +298,15 @@ def _pick_agency(rng, name):
 
 
 def _effective_date(rng):
-    """A recent award date (deterministic from the seeded rng)."""
-    start = datetime.date(2024, 1, 1)
-    end = datetime.date(2026, 6, 30)
-    return start + datetime.timedelta(days=rng.randint(0, (end - start).days))
+    """A base-year start anchored so the period of performance is currently in
+    progress: recent enough that today falls inside the base year. A burn /
+    runway tool only has something to watch while a period is active, so the
+    generated contract should be one you're partway through — not one whose base
+    year ended long before its timesheets were logged. Still seeded (the offset
+    is drawn from rng); the absolute date floats with today, as the timesheet
+    dates already do."""
+    weeks_into_base = rng.randint(20, 44)  # today lands ~5-10 months into the base year
+    return datetime.date.today() - datetime.timedelta(weeks=weeks_into_base)
 
 
 def _build_periods(rng, faker, effective, option_years, labor_type, opts):
@@ -1121,10 +1126,27 @@ def _recent_month(rng):
     return f"{year:04d}-{month:02d}"
 
 
-def _recent_week_ending(rng):
-    """A recent Friday (a weekly timesheet's week-ending date)."""
-    day = datetime.date.today() - datetime.timedelta(weeks=rng.randint(0, 25))
+def _recent_week_ending(rng, earliest=None):
+    """A recent Friday (a weekly timesheet's week-ending date). Bounded so it
+    never predates `earliest` (the period-of-performance start of the CLIN being
+    charged): a timesheet week has to fall inside the period it books hours to,
+    or a burn tool can't line the hours up against that period's ceiling."""
+    today = datetime.date.today()
+    max_back = 25
+    if earliest is not None:
+        max_back = min(max_back, max(0, (today - earliest).days // 7))
+    day = today - datetime.timedelta(weeks=rng.randint(0, max_back))
     return _fmt_date(day - datetime.timedelta(days=(day.weekday() - 4) % 7))
+
+
+def _scenario_pop_start(opts):
+    """Base-period start of the shared scenario contract, if any — used to keep
+    timesheet weeks inside the period whose CLINs they charge."""
+    scenario = (opts or {}).get("_scenario")
+    if not scenario:
+        return None
+    periods = scenario["contract"].get("periods") or []
+    return periods[0]["pop_start"] if periods else None
 
 
 def build_scenario(seed, opts=None):
@@ -1235,7 +1257,7 @@ def _timesheet_row(rng, faker, index, opts=None):
     return {
         "employee": name,
         "employee_id": emp_id,
-        "week_ending": _recent_week_ending(rng),
+        "week_ending": _recent_week_ending(rng, _scenario_pop_start(opts)),
         "contract_no": piid,
         "charge_code": clin,
         "labor_category": lcat,
