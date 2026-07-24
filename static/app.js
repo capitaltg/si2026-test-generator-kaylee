@@ -23,6 +23,7 @@ const state = {
   fields: [],
   preset: null, // active GovCon template key (null = normal builder mode)
   presetKind: null, // "form" | "data" — how the active preset renders/exports
+  presetOpts: {}, // opt-in generation options for the active preset (e.g. pop_in_progress)
   presets: [], // template gallery, from GET /templates
   custom: [], // user-saved templates, from localStorage
   loadedTemplateKey: null, // key of the saved template currently loaded (for "Update")
@@ -101,6 +102,9 @@ const GALLERY_FILTERS = [
 ];
 
 function loadCustomTemplates() {
+  // Saved templates are per-user (localStorage) and only ever created by the
+  // user via Save — nothing is auto-seeded and nothing is offered to add, so no
+  // one gets a template (e.g. a Runway-specific one) they didn't create.
   try {
     return JSON.parse(localStorage.getItem(TPL_STORE)) || [];
   } catch (e) {
@@ -382,6 +386,121 @@ function renderInputTabs() {
     .join("");
 }
 
+// Opt-in generation knobs surfaced when a GovCon preset is active. Every one is
+// off / "Any" by default, so empty presetOpts => the engine generates exactly as
+// it always has. Whatever is set gets captured into a saved template so a tuned
+// preset can be re-loaded. Each knob maps straight to a backend `opts` key.
+// type: "bool" (checkbox), "select" (dropdown), or "number" (bounded integer).
+const PRESET_OPTIONS = [
+  {
+    key: "pop_in_progress",
+    type: "bool",
+    label: "Period of performance in progress",
+    hint: "Anchor the award's base year to today so it's mid-flight — timesheets fall inside the current period. Good for burn/runway demos.",
+  },
+  {
+    key: "agency",
+    type: "select",
+    label: "Agency",
+    hint: "Force the awarding agency (also sets the PIID format).",
+    choices: [
+      ["", "Any (random)"],
+      ["Department of Homeland Security", "Homeland Security (DHS)"],
+      ["General Services Administration", "GSA"],
+      ["Department of the Army", "Army"],
+      ["Department of the Navy", "Navy"],
+      ["Department of Veterans Affairs", "Veterans Affairs (VA)"],
+    ],
+  },
+  {
+    key: "contract_type",
+    type: "select",
+    label: "Contract type",
+    hint: "Pin the contract type instead of a random one.",
+    choices: [
+      ["", "Any (random)"],
+      ["T&M", "T&M"],
+      ["CPFF", "CPFF"],
+      ["FFP", "FFP"],
+      ["IDIQ", "IDIQ"],
+    ],
+  },
+  {
+    key: "set_aside",
+    type: "select",
+    label: "Set-aside",
+    hint: "Pin the socioeconomic set-aside category.",
+    choices: [
+      ["", "Any (random)"],
+      ["Unrestricted", "Unrestricted"],
+      ["Small Business", "Small Business"],
+      ["8(a)", "8(a)"],
+      ["Service-Disabled Veteran-Owned Small Business", "SDVOSB"],
+      ["Women-Owned Small Business", "WOSB"],
+      ["HUBZone Small Business", "HUBZone"],
+    ],
+  },
+  {
+    key: "option_years",
+    type: "number",
+    label: "Option years",
+    hint: "How many option years follow the base year (0–4). Blank = random.",
+    min: 0,
+    max: 4,
+  },
+  {
+    key: "lcat_lines",
+    type: "number",
+    label: "Labor lines per CLIN",
+    hint: "How many labor-category lines each labor CLIN carries (1–8). Blank = random.",
+    min: 1,
+    max: 8,
+  },
+];
+
+// One option's control, reflecting the current presetOpts value.
+function presetOptionHtml(o) {
+  const cur = state.presetOpts[o.key];
+  if (o.type === "bool") {
+    return (
+      `<label class="tpl-opt" title="${escapeHtml(o.hint)}">` +
+      `<input type="checkbox" data-opt="${o.key}" ${cur ? "checked" : ""} />` +
+      `<span class="tpl-opt-label">${escapeHtml(o.label)}</span></label>`
+    );
+  }
+  if (o.type === "select") {
+    const opts = o.choices
+      .map(
+        ([val, lbl]) =>
+          `<option value="${escapeHtml(val)}" ${String(cur ?? "") === val ? "selected" : ""}>${escapeHtml(lbl)}</option>`
+      )
+      .join("");
+    return (
+      `<label class="tpl-opt-field" title="${escapeHtml(o.hint)}">` +
+      `<span class="tpl-opt-name">${escapeHtml(o.label)}</span>` +
+      `<select data-opt="${o.key}">${opts}</select></label>`
+    );
+  }
+  // number
+  return (
+    `<label class="tpl-opt-field" title="${escapeHtml(o.hint)}">` +
+    `<span class="tpl-opt-name">${escapeHtml(o.label)}</span>` +
+    `<input type="number" data-opt="${o.key}" min="${o.min}" max="${o.max}" ` +
+    `placeholder="random" value="${cur ?? ""}" /></label>`
+  );
+}
+
+// The options panel shown above the gallery while a built-in preset is active.
+function presetOptionsHtml() {
+  const rows = PRESET_OPTIONS.map(presetOptionHtml).join("");
+  return (
+    `<div class="tpl-options"><div class="tpl-options-head">Generation options</div>` +
+    `<div class="tpl-opts-note">Leave a field on its default to keep it randomized. Saved with the template.</div>` +
+    rows +
+    `</div>`
+  );
+}
+
 // The template gallery: a card per GovCon preset. The active one is highlighted.
 // Picking a card is what turns on preset mode; there's also a card to leave it.
 function galleryHtml() {
@@ -431,6 +550,10 @@ function galleryHtml() {
     `<div class="tpl-intro">Pick a GovCon document template — or one of your own saved ` +
     `setups. It autogenerates realistic, internally-consistent data — hit ` +
     `<b>Randomize</b> (or change the <b>randomization seed</b>) to re-roll.</div>` +
+    // When a built-in preset is active, offer its opt-in generation knobs.
+    (state.preset && !String(state.preset).startsWith("custom:")
+      ? presetOptionsHtml()
+      : "") +
     `<div class="tpl-filterbar">${bar}</div>` +
     `<div class="tpl-gallery">${cards}</div>` +
     empty
@@ -557,7 +680,7 @@ async function exportText(format) {
   if (state.exportCache[format] != null) return state.exportCache[format];
   // A data preset exports its records; the builder exports its field schema.
   const body = state.preset
-    ? { preset: state.preset, rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.preset }
+    ? { preset: state.preset, rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.preset, preset_opts: state.presetOpts }
     : { fields: buildFields(), rows: Math.min(state.rowCount, PREVIEW_CAP), seed: state.seed, format, table: state.tableName };
   const resp = await postJSON("/export", body);
   const text = await resp.text();
@@ -736,10 +859,13 @@ function buildFields() {
 }
 
 // Switch the studio into (or out of) template mode. An empty key clears it.
-function selectPreset(key) {
+// `presetOpts` seeds the generation knobs (used when restoring a saved preset
+// template); a plain user pick passes nothing, so the knobs reset to off.
+function selectPreset(key, presetOpts = {}) {
   // Entering a GovCon preset (or clearing to the builder) drops any loaded
   // custom-template context — "Update" no longer applies.
   state.loadedTemplateKey = null;
+  state.presetOpts = Object.assign({}, presetOpts);
   if (!key) {
     state.preset = null;
     state.presetKind = null;
@@ -767,9 +893,19 @@ function selectPreset(key) {
 let pendingSnapshot = null; // studio snapshot awaiting a name in the modal
 let pendingClash = null; // an existing template whose name the new one collides with
 
-// Capture the current Builder setup as a saveable snapshot. (Saving a GovCon
-// preset as a template is deferred to a later ticket — see openSaveModal.)
+// Capture the current studio state as a saveable snapshot. A GovCon preset is
+// saved as a bookmark (which preset, seed, row count, and its generation opts);
+// the Builder is saved in full (fields, theme, table). Mirrors shareSnapshot.
 function currentTemplateSnapshot() {
+  if (state.preset) {
+    return {
+      origin: "preset",
+      base: state.preset,
+      seed: state.seed,
+      rowCount: state.rowCount,
+      opts: Object.assign({}, state.presetOpts),
+    };
+  }
   return {
     origin: "builder",
     fields: JSON.parse(JSON.stringify(state.fields)),
@@ -781,8 +917,14 @@ function currentTemplateSnapshot() {
   };
 }
 
-// One-line card summary of a snapshot: "N fields · seed X · N rows".
+// One-line card summary of a snapshot: a preset bookmark reads "GovCon · <label>
+// · seed X"; a Builder setup reads "N fields · seed X · N rows".
 function describeSnapshot(s) {
+  if (s.origin === "preset") {
+    const p = state.presets.find((x) => x.key === s.base);
+    const opts = Object.keys(s.opts || {}).length ? " · tuned" : "";
+    return `GovCon · ${p ? p.label : s.base} · seed ${s.seed}${opts}`;
+  }
   return `${s.fields.length} field${s.fields.length === 1 ? "" : "s"} · seed ${s.seed} · ${s.rowCount} rows`;
 }
 
@@ -798,7 +940,7 @@ const SHARE_PREFIX = "#c=";
 // nullPct/empty opts are omitted. applySnapshot fills those defaults back in.
 function shareSnapshot() {
   if (state.preset) {
-    return { origin: "preset", base: state.preset, seed: state.seed, rowCount: state.rowCount };
+    return { origin: "preset", base: state.preset, seed: state.seed, rowCount: state.rowCount, opts: Object.assign({}, state.presetOpts) };
   }
   const full = currentTemplateSnapshot();
   full.fields = full.fields.map((f) => {
@@ -918,17 +1060,12 @@ function resetSaveConflict() {
 }
 
 function openSaveModal() {
-  // Only Builder setups are saveable for now. GovCon presets have no editable
-  // knobs yet, so saving one would just be a thin seed bookmark — revisit later.
-  if (state.preset) {
-    toast("Saving GovCon templates comes later — Builder setups only for now");
-    return;
-  }
+  // Both a GovCon preset (with its generation options) and a Builder setup are
+  // saveable as templates; the snapshot captures whichever is active.
   pendingSnapshot = currentTemplateSnapshot();
   resetSaveConflict();
   const loaded = loadedTemplate();
-  $("#saveModalSub").textContent =
-    `Builder · ${pendingSnapshot.fields.length} field${pendingSnapshot.fields.length === 1 ? "" : "s"} · seed ${pendingSnapshot.seed}`;
+  $("#saveModalSub").textContent = describeSnapshot(pendingSnapshot);
   // Prefill the loaded template's name so re-saving it just overwrites it.
   $("#saveModalName").value = loaded ? loaded.label : "";
   $("#saveModal").hidden = false;
@@ -1063,7 +1200,7 @@ function applySnapshot(snap) {
     // render + regenerate (it also clears any loaded-template context).
     state.inputTab = "templates";
     renderInputTabs();
-    selectPreset(snap.base);
+    selectPreset(snap.base, snap.opts || {});
     return;
   }
 
@@ -1191,7 +1328,14 @@ async function generatePreset(total) {
 }
 
 function presetReqBody(rows) {
-  return { preset: state.preset, rows, seed: state.seed, format: "pdf", table: state.preset };
+  return {
+    preset: state.preset,
+    rows,
+    seed: state.seed,
+    format: "pdf",
+    table: state.preset,
+    preset_opts: state.presetOpts,
+  };
 }
 
 function addField() {
@@ -1256,6 +1400,7 @@ async function download() {
           seed: state.seed,
           format: fmt,
           table: state.preset,
+          preset_opts: state.presetOpts,
         });
         const blob = await resp.blob();
         const a = document.createElement("a");
@@ -1574,6 +1719,26 @@ function wireEvents() {
     if (!b) return;
     if (b.dataset.action === "add") addField();
     else if (b.dataset.action === "remove") removeField(b.dataset.id);
+  });
+
+  // Preset generation-option controls (checkbox / dropdown / number): update the
+  // opt and re-generate so the preview reflects it immediately. A default value
+  // (unchecked, "Any", or blank) removes the key, so it stays randomized. Set
+  // opts are captured if the preset is saved.
+  panel.addEventListener("change", (e) => {
+    const el = e.target.closest("[data-opt]");
+    if (!el) return;
+    const key = el.dataset.opt;
+    if (el.type === "checkbox") {
+      if (el.checked) state.presetOpts[key] = true;
+      else delete state.presetOpts[key];
+    } else if (el.value === "") {
+      delete state.presetOpts[key]; // "Any" / blank → randomized
+    } else {
+      state.presetOpts[key] = el.type === "number" ? Number(el.value) : el.value;
+    }
+    state.exportCache = {};
+    generate();
   });
 
   // Custom cards are divs; make Enter open them (buttons do this natively).
