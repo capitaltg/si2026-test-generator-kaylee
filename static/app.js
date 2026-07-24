@@ -429,8 +429,8 @@ function galleryHtml() {
 
   return (
     `<div class="tpl-intro">Pick a GovCon document template — or one of your own saved ` +
-    `setups. It autogenerates realistic, internally-consistent data — change the ` +
-    `<b>seed</b> above to re-roll.</div>` +
+    `setups. It autogenerates realistic, internally-consistent data — hit ` +
+    `<b>Randomize</b> (or change the <b>randomization seed</b>) to re-roll.</div>` +
     `<div class="tpl-filterbar">${bar}</div>` +
     `<div class="tpl-gallery">${cards}</div>` +
     empty
@@ -1173,7 +1173,7 @@ async function generatePreset(total) {
   body.innerHTML =
     `<div class="pdf-pane"><div class="pdf-controls"><div class="pdf-hint">` +
     `Filled real form — one copy per record, each with generated, reconciling data. ` +
-    `Change the seed to re-roll; click Export to download.</div></div>` +
+    `Hit Randomize to re-roll; click Export to download.</div></div>` +
     `<div class="pdf-preview"><iframe id="pdfFrame" title="Form preview"></iframe>` +
     `<div class="pdf-preview-note" id="pdfNote">Building preview…</div></div></div>`;
   try {
@@ -1312,6 +1312,12 @@ async function copyOutput() {
 
 function wireEvents() {
   $("#generate").addEventListener("click", () => {
+    // Re-roll: pick a fresh random seed so the button actually produces new
+    // data. Generation is deterministic, so re-running with an unchanged seed
+    // would be a no-op — the die icon promises a new roll, so we give one. The
+    // seed field updates to match and stays editable for reproducible runs.
+    state.seed = Math.floor(Math.random() * 100000);
+    $("#seed").value = state.seed;
     // One-shot "roll" spin on the die icon; re-trigger by restarting the anim.
     const g = $("#generate");
     g.classList.remove("rolling");
