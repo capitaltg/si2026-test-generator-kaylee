@@ -31,6 +31,7 @@ import datetime
 import string
 
 from .fields import _NAICS, gen_alnum as _alnum, gen_uei as _uei
+from .schedule import sf1449_continuation, sf26_section_b
 
 from faker import Faker
 
@@ -648,6 +649,74 @@ def contract_to_sf1449(contract):
     return values
 
 
+def contract_to_sf26(contract):
+    """Map a contract onto the real SF-26 (Award/Contract), the negotiated-award
+    form built on the Uniform Contract Format. The face carries the header and a
+    5-row CLIN summary grid (block 15); the detailed fully-burdened labor rates
+    ride on the Section B continuation sheet (see schedule.sf26_section_b), which
+    the exporter appends. The block-16 table of contents points to it."""
+    c = contract
+    contractor = c["contractor"]
+    base = c["periods"][0]["clins"] if c["periods"] else []
+    base_value = _fmt_money(c["periods"][0]["ceiling"] if c["periods"] else 0.0)
+    accounting = (
+        f"Appropriation FY{c['effective_date'].year % 100:02d}; "
+        f"Obligated to date {_fmt_money(c['total_obligated'])} of "
+        f"{_fmt_money(c['total_ceiling'])} ceiling."
+    )
+    values = {
+        # Blocks 2-4: contract number, effective date, requisition/solicitation.
+        _P + "CONTR2[0]": c["piid"],
+        _P + "EFECTDATE3[0]": _fmt_date(c["effective_date"]),
+        _P + "REQUISITION4[0]": c["solicitation_no"],
+        _P + "SOLMUN[0]": c["solicitation_no"],
+        # Blocks 5-6: issuing and administering offices, with their CODE boxes.
+        _P + "CODE5[0]": c["issuing_office_code"],
+        _P + "ISSUED5[0]": f"{c['agency']}\n{c['issuing_office']}",
+        _P + "CODE6[0]": c["admin_office_code"],
+        _P + "ADMIN6[0]": c["issuing_office"],
+        # Block 7: contractor name/address, CAGE (CODE) and facility code.
+        _P + "NAMEADDY7[0]": f"{contractor['name']}\n{contractor['address']}\n"
+        f"UEI {contractor['uei']}  CAGE {contractor['cage']}",
+        _P + "CODE7[0]": contractor["cage"],
+        _P + "FACILITYCODE7[0]": contractor["cage"],
+        # Block 8 delivery (FOB origin) and block 9 prompt-payment discount.
+        _P + "FOBORIGIN[0]": "/1",
+        _P + "DISCOUNT[0]": c["discount_terms"],
+        # Blocks 10-12: invoicing, ship-to, payment offices.
+        _P + "INVOICE[0]": c["issuing_office"],
+        _P + "NUMCOPY[0]": "1",
+        _P + "SHIP11[0]": c["issuing_office"],
+        _P + "CODE1[0]": c["issuing_office_code"],
+        _P + "CODE2[0]": c["admin_office_code"],
+        # Block 14 accounting and appropriation data.
+        _P + "ACCOUNTING14[0]": accounting,
+        # Block 15G: total award (awarded base-year value).
+        _P + "F15TOTAL[0]": base_value,
+        # Block 16 table of contents: Section B (the labor rate schedule) is
+        # present on the continuation sheet appended after this page.
+        _P + "G15B[0]": "/1",
+        _P + "PAGESB[0]": "B-1",
+        # Block 17: a negotiated agreement — the contractor signs and returns it.
+        _P + "CONT17[0]": "/1",
+        _P + "NAMETITLE[0]": f"{contractor['name']} / {c['signer_title']}",
+        _P + "DateSIGNED19C[0]": _fmt_date(c["effective_date"]),
+        _P + "NAMECONTRACTING[0]": c["contracting_officer"],
+        _P + "DateSIGNED20[0]": _fmt_date(c["effective_date"]),
+        _P + "PAGE1[0]": "1",
+    }
+
+    # Block 15 line-item grid: the SF-26 face fits 5 base-year CLIN summary rows.
+    for i, clin in enumerate(base[:5], start=1):
+        values[_P + f"ITEMNO{i}[0]"] = clin["clin"]
+        values[_P + f"SUPPLIESSERVICES{i}[0]"] = f"{clin['title']} ({clin['type']})"
+        values[_P + f"C15{i}[0]"] = "1"
+        values[_P + f"D15{i}[0]"] = "LO"
+        values[_P + f"E15{i}[0]"] = _fmt_money(clin["ceiling"])
+        values[_P + f"F15{i}[0]"] = _fmt_money(clin["ceiling"])
+    return values
+
+
 def contract_to_sf30(contract):
     """Map a contract's latest funding modification onto the real SF-30. The
     SF-30 documents a change to an existing contract, so we render the most
@@ -1262,6 +1331,21 @@ PRESETS = {
         "form": "SF1449.pdf",
         "build": build_contract,
         "mapping": contract_to_sf1449,
+        # The SF-1449 face has no rate table; the negotiated labor rates ride on
+        # an appended "Continuation of SF-1449" pricing schedule.
+        "attachment": sf1449_continuation,
+    },
+    "govcon_award_sf26": {
+        "label": "Contract Award (SF-26)",
+        "description": "A negotiated award on the real SF-26 (Uniform Contract "
+        "Format). The face carries the header and a CLIN summary; the fully-"
+        "burdened labor rate schedule is appended as Section B. Ceiling, "
+        "obligated and line totals all reconcile.",
+        "kind": "form",
+        "form": "SF26.pdf",
+        "build": build_contract,
+        "mapping": contract_to_sf26,
+        "attachment": sf26_section_b,
     },
     "govcon_mod_sf30": {
         "label": "Contract Modification (SF-30)",
