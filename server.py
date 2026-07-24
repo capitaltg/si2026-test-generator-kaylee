@@ -222,7 +222,13 @@ def export(req: ExportRequest) -> Response:
         try:
             if preset_kind == "form":
                 values_list = [preset_form_values(req.preset, r) for r in records]
-                content = fill_forms_bytes(preset["form"], values_list)
+                # Some awards carry a rate-schedule continuation sheet appended
+                # after each form copy (the form face has no rate table).
+                attach_fn = preset.get("attachment")
+                attachments = [attach_fn(r) for r in records] if attach_fn else None
+                content = fill_forms_bytes(
+                    preset["form"], values_list, attachments=attachments
+                )
             else:
                 # Custom document with no official form: render as a fillable
                 # AcroForm PDF (editable fields), one page-set per record.

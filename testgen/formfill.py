@@ -91,7 +91,7 @@ def fill_form_bytes(form_name, values, footer=SIM_FOOTER):
     return out.getvalue()
 
 
-def fill_forms_bytes(form_name, values_list, footer=SIM_FOOTER):
+def fill_forms_bytes(form_name, values_list, footer=SIM_FOOTER, attachments=None):
     """Fill the same blank form once per record and return ONE combined PDF.
 
     Each record becomes its own copy of the form (its own page(s)) in the output.
@@ -99,18 +99,25 @@ def fill_forms_bytes(form_name, values_list, footer=SIM_FOOTER):
     naively merging them makes all copies show the last record's values. We avoid
     that by giving each copy's top-level field a unique name prefix, so the merged
     forms stay independent.
+
+    attachments  optional list aligned with values_list; each item is either
+                 None or PDF bytes (e.g. a rate-schedule continuation sheet) to
+                 append immediately after that record's form copy.
     """
     if not values_list:
         raise ValueError("fill_forms_bytes needs at least one record.")
-    if len(values_list) == 1:
+    attachments = attachments or [None] * len(values_list)
+    if len(values_list) == 1 and not attachments[0]:
         return fill_form_bytes(form_name, values_list[0], footer)
 
     master = PdfWriter()
-    for i, values in enumerate(values_list):
+    for i, (values, extra) in enumerate(zip(values_list, attachments)):
         single = fill_form_bytes(form_name, values, footer)
         reader = PdfReader(io.BytesIO(single))
         _prefix_field_names(reader, f"c{i}_")
         master.append(reader)
+        if extra:
+            master.append(PdfReader(io.BytesIO(extra)))
 
     # Re-assert NeedAppearances on the merged AcroForm so every copy renders.
     acro = master._root_object.get("/AcroForm")
