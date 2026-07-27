@@ -1244,6 +1244,14 @@ def build_scenario(seed, opts=None):
     the SAME contract number, the SAME CLINs, and (for the two exports) the SAME
     people at the SAME rates — so the generated set analyzes as one coherent
     contract. Consistency holds only when a seed is set (None => not reproducible).
+
+    opts.staffing (optional float) sizes the roster relative to how the contract
+    is actually staffed on paper. Each labor line estimates N FTEs from its hours
+    (est_hours / 2080); the roster gets round(staffing * N) real people on that
+    line — so `staffing=1.0` fields a roster that burns the contract on plan,
+    `0.25` a lightly-staffed / under-burning one, `1.2` a hot / over-running one.
+    Left unset, the roster keeps its original shape of exactly one person per
+    labor line (unchanged output for every existing caller).
     """
     import random
 
@@ -1253,23 +1261,35 @@ def build_scenario(seed, opts=None):
         faker.seed_instance(seed)
     contract = build_contract(rng, faker, 0, opts)
 
-    # One roster entry per labor line on each base-year labor CLIN: a named person
-    # tied to that CLIN, their LCAT, and the CLIN's actual loaded bill rate.
+    _staffing = (opts or {}).get("staffing")
+    staffing = float(_staffing) if _staffing not in (None, "") else None
+
+    # A roster of named people tied to each base-year labor line — their LCAT,
+    # clearance, CLIN and the line's actual loaded bill rate. Without a staffing
+    # factor that's one person per line (the original shape); with one, each line
+    # is crewed to round(staffing * its FTE count) people so the logged hours the
+    # timesheet/labor exports roll up actually reflect that staffing level.
     roster = []
     base = contract["periods"][0]["clins"] if contract["periods"] else []
     for clin in base:
         for line in clin.get("labor_rates", []):
-            name, emp_id = _employee(faker)
-            roster.append(
-                {
-                    "employee": name,
-                    "employee_id": emp_id,
-                    "labor_category": line["lcat"],
-                    "clearance": line["clearance"],
-                    "clin": clin["clin"],
-                    "bill_rate": line["loaded_rate"],
-                }
-            )
+            if staffing is not None:
+                fte = max(1, round((line.get("est_hours") or 2080) / 2080))
+                n_people = max(1, round(staffing * fte))
+            else:
+                n_people = 1
+            for _ in range(n_people):
+                name, emp_id = _employee(faker)
+                roster.append(
+                    {
+                        "employee": name,
+                        "employee_id": emp_id,
+                        "labor_category": line["lcat"],
+                        "clearance": line["clearance"],
+                        "clin": clin["clin"],
+                        "bill_rate": line["loaded_rate"],
+                    }
+                )
     return {"contract": contract, "roster": roster}
 
 
