@@ -1495,6 +1495,33 @@ PRESETS = {
 }
 
 
+# Which generation knobs each preset surfaces in the gallery, by option key
+# (the front-end owns each knob's label/type/hint; this just says WHICH apply to
+# WHICH document). Contract/award presets shape the underlying contract; the
+# scenario labor exports only take a staffing factor. A preset absent here (or
+# mapped to []) shows no options panel at all.
+_CONTRACT_OPTS = [
+    "pop_in_progress",
+    "agency",
+    "contract_type",
+    "set_aside",
+    "option_years",
+    "lcat_lines",
+]
+PRESET_OPTIONS_BY_KEY = {
+    "govcon_award_sf1449": _CONTRACT_OPTS,
+    "govcon_award_sf26": _CONTRACT_OPTS,
+    "govcon_mod_sf30": _CONTRACT_OPTS,
+    "govcon_invoice": _CONTRACT_OPTS,
+    "govcon_funding_summary": _CONTRACT_OPTS,
+    "govcon_award_letter": _CONTRACT_OPTS,
+    "govcon_record_sheet": _CONTRACT_OPTS,
+    "govcon_contract_data": _CONTRACT_OPTS,
+    "govcon_labor_export": ["staffing"],
+    "govcon_timesheet": ["staffing"],
+}
+
+
 def list_presets():
     """Preset metadata for the front-end gallery (no builder functions)."""
     return [
@@ -1504,9 +1531,21 @@ def list_presets():
             "description": p["description"],
             "kind": p["kind"],
             "form": p.get("form"),
+            "options": PRESET_OPTIONS_BY_KEY.get(key, []),
         }
         for key, p in PRESETS.items()
     ]
+
+
+def scenario_roster_size(key, *, seed=None, opts=None):
+    """How many distinct people a scenario preset's roster holds for this seed +
+    opts — the row count that shows every person exactly once. Lets the UI snap
+    rows to the roster when the staffing factor changes (otherwise a low row cap
+    hides the people staffing adds). None when the preset isn't a scenario."""
+    if not PRESETS.get(key, {}).get("scenario"):
+        return None
+    base_opts = {k: v for k, v in (opts or {}).items() if not k.startswith("_")}
+    return len(build_scenario(seed, base_opts)["roster"])
 
 
 def generate_preset(key, *, rows=5, seed=None, opts=None):

@@ -154,7 +154,9 @@ body {
 .tpl-intro { font-size: 13px; color: var(--muted); line-height: 1.55; margin-bottom: 16px; }
 .tpl-options {
   border: 1px solid var(--border-soft); border-radius: 10px; padding: 11px 13px;
-  margin-bottom: 14px; background: #f7fafd; display: flex; flex-direction: column; gap: 9px;
+  /* Sits directly above its active card in the flex-column gallery; the negative
+     bottom margin pulls it snug against that card so they read as one unit. */
+  margin-bottom: -5px; background: #f7fafd; display: flex; flex-direction: column; gap: 9px;
 }
 .tpl-options-head {
   font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;

@@ -39,6 +39,7 @@ from testgen import (
     generate,
     generate_preset,
     list_presets,
+    scenario_roster_size,
     preset_form_values,
     render_fillable,
     to_csv_string,
@@ -166,8 +167,14 @@ def templates() -> dict:
 @app.post("/generate")
 def generate_rows(req: GenerateRequest) -> dict:
     """Generate rows and return them as JSON. FastAPI encodes dates/datetimes to
-    strings automatically."""
-    return {"rows": _make_rows(req)}
+    strings automatically. For scenario presets we also report the roster size so
+    the UI can size rows to show every person once."""
+    out = {"rows": _make_rows(req)}
+    if req.preset:
+        out["scenario_size"] = scenario_roster_size(
+            req.preset, seed=req.seed, opts=req.preset_opts
+        )
+    return out
 
 
 # How each export format is built and served. Each build fn takes (rows, req)
