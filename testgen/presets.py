@@ -1225,7 +1225,13 @@ def _recent_week_ending(rng, earliest=None):
     if earliest is not None:
         max_back = min(max_back, max(0, (today - earliest).days // 7))
     day = today - datetime.timedelta(weeks=rng.randint(0, max_back))
-    return _fmt_date(day - datetime.timedelta(days=(day.weekday() - 4) % 7))
+    friday = day - datetime.timedelta(days=(day.weekday() - 4) % 7)
+    # Rounding back to the week's Friday can land just before `earliest` (the
+    # PoP start); roll forward a week so a timesheet never charges a week that
+    # starts before the period it belongs to.
+    if earliest is not None and friday < earliest:
+        friday += datetime.timedelta(days=7)
+    return _fmt_date(friday)
 
 
 def build_scenario(seed, opts=None):
