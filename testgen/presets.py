@@ -197,7 +197,7 @@ def build_contract(rng, faker, index, opts=None):
 
     # Who and what.
     agency = _pick_agency(rng, opts.get("agency"))
-    effective = _effective_date(rng)
+    effective = _effective_date(rng, opts)
     piid = _piid(rng, faker, agency, effective)
     contractor = {
         "name": faker.company(),
@@ -206,13 +206,18 @@ def build_contract(rng, faker, index, opts=None):
         "address": faker.address().replace("\n", ", "),
         "phone": faker.numerify("(###) ###-####"),
     }
-    contract_type = rng.choice(["T&M", "CPFF", "FFP", "IDIQ"])
+    # contract_type is opt-pinnable; unset => the usual random pick.
+    contract_type = opts.get("contract_type") or rng.choice(
+        ["T&M", "CPFF", "FFP", "IDIQ"]
+    )
 
     # Acquisition metadata a real award records: the NAICS + size standard the
     # buy was solicited under, the set-aside, and the pre-award solicitation
     # milestones (issued, then offers due, then award — strictly in that order).
     naics = rng.choice(_NAICS)
-    set_aside = rng.choices(_SET_ASIDES, weights=_SET_ASIDE_WEIGHTS)[0][0]
+    # set_aside is opt-pinnable to any known category label; unset => weighted
+    # random (favoring unrestricted / small business).
+    set_aside = _pick_set_aside(rng, opts.get("set_aside"))
     solicitation_issue = effective - datetime.timedelta(days=rng.randint(45, 90))
     offer_due = effective - datetime.timedelta(days=rng.randint(10, 30))
     labor_type = "FFP" if contract_type == "FFP" else rng.choice(["T&M", "CPFF"])
@@ -230,7 +235,8 @@ def build_contract(rng, faker, index, opts=None):
     }
 
     # Periods: 1 base year + N option years, contiguous (invariant 6).
-    option_years = int(opts.get("option_years", rng.randint(1, 4)))
+    _oy = opts.get("option_years")
+    option_years = int(_oy) if _oy not in (None, "") else rng.randint(1, 4)
     periods = _build_periods(rng, faker, effective, option_years, labor_type, opts)
 
     # Roll periods up into the total ceiling (invariant 2).
@@ -298,8 +304,26 @@ def _pick_agency(rng, name):
     return rng.choice(_AGENCIES)
 
 
-def _effective_date(rng):
-    """A recent award date (deterministic from the seeded rng)."""
+def _pick_set_aside(rng, label):
+    """The set-aside label to record. A caller-pinned label is used verbatim when
+    it's a known category; otherwise (or unset) a weighted random one is chosen."""
+    if label:
+        for name, _boxes in _SET_ASIDES:
+            if name == label:
+                return name
+    return rng.choices(_SET_ASIDES, weights=_SET_ASIDE_WEIGHTS)[0][0]
+
+
+def _effective_date(rng, opts=None):
+    """A recent award date (deterministic from the seeded rng).
+
+    Default: a random date across 2024-2026. When the opt-in
+    "pop_in_progress" flag is set, anchor the base year to the present so today
+    lands ~5-10 months into the base period of performance — i.e. an award
+    that is currently mid-flight (used by burn/runway demos)."""
+    if opts and opts.get("pop_in_progress"):
+        weeks_into_base = rng.randint(20, 44)
+        return datetime.date.today() - datetime.timedelta(weeks=weeks_into_base)
     start = datetime.date(2024, 1, 1)
     end = datetime.date(2026, 6, 30)
     return start + datetime.timedelta(days=rng.randint(0, (end - start).days))
@@ -1190,10 +1214,24 @@ def _recent_month(rng):
     return f"{year:04d}-{month:02d}"
 
 
-def _recent_week_ending(rng):
-    """A recent Friday (a weekly timesheet's week-ending date)."""
-    day = datetime.date.today() - datetime.timedelta(weeks=rng.randint(0, 25))
-    return _fmt_date(day - datetime.timedelta(days=(day.weekday() - 4) % 7))
+def _recent_week_ending(rng, earliest=None):
+    """A recent Friday (a weekly timesheet's week-ending date).
+
+    Normally within the last ~25 weeks. When `earliest` (a date) is given, the
+    week is bounded so it never predates that day — used so timesheet weeks stay
+    inside the period of performance they charge against."""
+    today = datetime.date.today()
+    max_back = 25
+    if earliest is not None:
+        max_back = min(max_back, max(0, (today - earliest).days // 7))
+    day = today - datetime.timedelta(weeks=rng.randint(0, max_back))
+    friday = day - datetime.timedelta(days=(day.weekday() - 4) % 7)
+    # Rounding back to the week's Friday can land just before `earliest` (the
+    # PoP start); roll forward a week so a timesheet never charges a week that
+    # starts before the period it belongs to.
+    if earliest is not None and friday < earliest:
+        friday += datetime.timedelta(days=7)
+    return _fmt_date(friday)
 
 
 def build_scenario(seed, opts=None):
@@ -1243,6 +1281,17 @@ def _scenario_member(opts, index):
         return None, None
     roster = scenario["roster"]
     return scenario["contract"]["piid"], roster[index % len(roster)]
+
+
+def _scenario_base_pop_start(opts):
+    """The base period-of-performance start of the shared scenario's contract,
+    or None. Only used to bound timesheet weeks when pop_in_progress is on, so a
+    week can never fall before the period it charges."""
+    scenario = (opts or {}).get("_scenario")
+    if not scenario:
+        return None
+    periods = scenario["contract"].get("periods") or []
+    return periods[0]["pop_start"] if periods else None
 
 
 def _labor_export_row(rng, faker, index, opts=None):
@@ -1304,7 +1353,14 @@ def _timesheet_row(rng, faker, index, opts=None):
     return {
         "employee": name,
         "employee_id": emp_id,
-        "week_ending": _recent_week_ending(rng),
+        "week_ending": _recent_week_ending(
+            rng,
+            earliest=(
+                _scenario_base_pop_start(opts)
+                if opts and opts.get("pop_in_progress")
+                else None
+            ),
+        ),
         "contract_no": piid,
         "charge_code": clin,
         "labor_category": lcat,
