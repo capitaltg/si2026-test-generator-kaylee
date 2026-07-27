@@ -12,6 +12,7 @@ const state = {
   tableName: "users",
   seed: 42,
   rowCount: 25,
+  autoSizeRows: false, // set when a staffing change should snap rows to the roster
   inputTab: "builder",
   outputTab: "table",
   pdfMode: "table", // PDF flavour: "table" (one big table) or "docs" (page per row)
@@ -456,6 +457,16 @@ const PRESET_OPTIONS = [
     min: 1,
     max: 8,
   },
+  {
+    key: "staffing",
+    type: "number",
+    label: "Staffing level",
+    hint: "Crew each labor line to round(level × its FTEs) people, so the timesheet/labor exports reflect real staffing. 1 = on-plan, 0.25 = under-burning, 1.2 = hot/over-running. Blank = one person per line.",
+    min: 0,
+    max: 3,
+    step: 0.25,
+    placeholder: "one per line",
+  },
 ];
 
 // One option's control, reflecting the current presetOpts value.
@@ -486,13 +497,25 @@ function presetOptionHtml(o) {
     `<label class="tpl-opt-field" title="${escapeHtml(o.hint)}">` +
     `<span class="tpl-opt-name">${escapeHtml(o.label)}</span>` +
     `<input type="number" data-opt="${o.key}" min="${o.min}" max="${o.max}" ` +
-    `placeholder="random" value="${cur ?? ""}" /></label>`
+    (o.step ? `step="${o.step}" ` : "") +
+    `placeholder="${escapeHtml(o.placeholder ?? "random")}" value="${cur ?? ""}" /></label>`
   );
 }
 
-// The options panel shown above the gallery while a built-in preset is active.
-function presetOptionsHtml() {
-  const rows = PRESET_OPTIONS.map(presetOptionHtml).join("");
+// The options panel for one preset: only the knobs that preset actually uses
+// (from its `options` key), in the order it lists them. The front-end owns each
+// knob's control; the preset just names which apply. Returns "" when the preset
+// exposes none, so the caller can skip the panel entirely.
+function presetOptionsHtml(presetKey) {
+  const p = state.presets.find((x) => x.key === presetKey);
+  const keys = (p && p.options) || [];
+  const byKey = Object.fromEntries(PRESET_OPTIONS.map((o) => [o.key, o]));
+  const rows = keys
+    .map((k) => byKey[k])
+    .filter(Boolean)
+    .map(presetOptionHtml)
+    .join("");
+  if (!rows) return "";
   return (
     `<div class="tpl-options"><div class="tpl-options-head">Generation options</div>` +
     `<div class="tpl-opts-note">Leave a field on its default to keep it randomized. Saved with the template.</div>` +
@@ -525,7 +548,7 @@ function galleryHtml() {
       // role/tabindex keep them keyboard-activatable.
       const tag = isCustom ? "div" : "button";
       const attrs = isCustom ? ' role="button" tabindex="0"' : "";
-      return (
+      const card =
         `<${tag} class="tpl-card ${active ? "active" : ""}"${attrs} data-preset="${escapeHtml(p.key)}">` +
         `<div class="tpl-top"><span class="tpl-name">${escapeHtml(p.label)}</span>` +
         `<span class="tpl-badge tpl-badge-${p.kind}">${escapeHtml(badges[p.kind] || p.kind)}</span></div>` +
@@ -534,8 +557,11 @@ function galleryHtml() {
           ? `<span class="tpl-act tpl-rename" data-rename="${escapeHtml(p.key)}" title="Rename">✎</span>` +
             `<span class="tpl-act tpl-del" data-del="${escapeHtml(p.key)}" title="Delete">✕</span>`
           : "") +
-        `</${tag}>`
-      );
+        `</${tag}>`;
+      // The generation-options panel sits directly above the card that opened it
+      // (the gallery is a vertical list, so "before" reads as "above"). It only
+      // renders when this preset actually exposes options.
+      return active && !isCustom ? presetOptionsHtml(p.key) + card : card;
     })
     .join("");
 
@@ -550,10 +576,6 @@ function galleryHtml() {
     `<div class="tpl-intro">Pick a GovCon document template — or one of your own saved ` +
     `setups. It autogenerates realistic, internally-consistent data — hit ` +
     `<b>Randomize</b> (or change the <b>randomization seed</b>) to re-roll.</div>` +
-    // When a built-in preset is active, offer its opt-in generation knobs.
-    (state.preset && !String(state.preset).startsWith("custom:")
-      ? presetOptionsHtml()
-      : "") +
     `<div class="tpl-filterbar">${bar}</div>` +
     `<div class="tpl-gallery">${cards}</div>` +
     empty
@@ -1278,14 +1300,25 @@ async function generate() {
   // A form/doc preset renders a fixed PDF preview. The builder and data presets
   // both produce rows we render through the format tabs.
   if (state.preset && state.presetKind !== "data") return generatePreset(total);
+  const autoSize = state.autoSizeRows;
+  state.autoSizeRows = false;
   try {
     const started = performance.now();
     const body = state.preset
       ? presetReqBody(Math.min(total, PREVIEW_CAP))
       : { fields: buildFields(), rows: Math.min(total, PREVIEW_CAP), seed: state.seed };
     const resp = await postJSON("/generate", body);
-    state.rows = (await resp.json()).rows;
+    const data = await resp.json();
+    state.rows = data.rows;
     $("#statMs").textContent = ` · generated in ${Math.round(performance.now() - started)} ms`;
+    // Touching the staffing factor snaps rows to the roster so every generated
+    // person shows once (a low row cap otherwise hides the people it adds); the
+    // user can still retype rows afterward to override.
+    if (autoSize && data.scenario_size && state.rowCount !== data.scenario_size) {
+      state.rowCount = data.scenario_size;
+      renderRowsCtrl();
+      return generate();
+    }
   } catch (e) {
     state.rows = [];
     $("#statMs").textContent = "";
@@ -1710,6 +1743,12 @@ function wireEvents() {
         restoreCustomTemplate(key);
         return;
       }
+      // Clicking the already-active template deselects it, closing its options
+      // panel while staying on the gallery (no card left highlighted).
+      if (key && key === state.preset) {
+        selectPreset(null);
+        return;
+      }
       if (!key) state.inputTab = "builder"; // clearing returns to the builder
       selectPreset(key);
       if (!key) renderInputTabs();
@@ -1737,6 +1776,8 @@ function wireEvents() {
     } else {
       state.presetOpts[key] = el.type === "number" ? Number(el.value) : el.value;
     }
+    // Staffing resizes the roster, so snap the row count to it on the next run.
+    if (key === "staffing") state.autoSizeRows = true;
     state.exportCache = {};
     generate();
   });

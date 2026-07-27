@@ -49,6 +49,33 @@ def test_generate_returns_rows():
     assert all(5 <= r["amount"] <= 7 for r in rows)
 
 
+def test_generate_reports_scenario_size_for_scenario_preset():
+    # A scenario preset reports its roster size so the UI can size rows to it;
+    # setting a staffing factor grows that size.
+    base = client.post(
+        "/generate", json={"preset": "govcon_timesheet", "rows": 5, "seed": 42}
+    ).json()
+    assert base["scenario_size"] >= 1
+    staffed = client.post(
+        "/generate",
+        json={
+            "preset": "govcon_timesheet",
+            "rows": 5,
+            "seed": 42,
+            "preset_opts": {"staffing": 1.0},
+        },
+    ).json()
+    assert staffed["scenario_size"] > base["scenario_size"]
+
+
+def test_generate_scenario_size_absent_for_field_generation():
+    resp = client.post(
+        "/generate",
+        json={"fields": [{"name": "x", "type": "int"}], "rows": 2, "seed": 1},
+    ).json()
+    assert resp.get("scenario_size") is None
+
+
 def test_generate_same_seed_is_reproducible():
     body = {"fields": [{"name": "v", "type": "uuid"}], "rows": 5, "seed": 42}
     first = client.post("/generate", json=body).json()
