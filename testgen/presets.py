@@ -589,6 +589,20 @@ def _fmt_date(d):
     return d.strftime("%Y-%m-%d") if isinstance(d, datetime.date) else str(d)
 
 
+def _base_obligation(c):
+    """The dollars obligated on the base award itself — the first ("Award") entry
+    of the obligation history. An award form (SF-26 / SF-1449) must show what was
+    obligated *at award*, not the running total after later SF-30 mods; the mods
+    carry the increases on top (see _build_obligations). Ingesting the award alone
+    should therefore read the base obligation, and the mod trail should rebuild up
+    to total_obligated. Falls back to total_obligated for any contract with no
+    mod history."""
+    history = c.get("obligation_history") or []
+    if history:
+        return history[0]["cumulative_obligated"]
+    return c["total_obligated"]
+
+
 def _setaside_boxes(set_aside):
     """The SF-1449 block-10 checkbox field(s) to switch on for a set-aside label,
     each set to its "/1" on-state. Falls back to unrestricted if unrecognized."""
@@ -640,7 +654,7 @@ def contract_to_sf1449(contract):
         _P
         + "accountingdata[0]": (
             f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-            f"Obligated to date {_fmt_money(c['total_obligated'])} of "
+            f"Obligated to date {_fmt_money(_base_obligation(c))} of "
             f"{_fmt_money(c['total_ceiling'])} ceiling."
         ),
         # Block 26 total award = the awarded (base-year) value.
@@ -717,7 +731,7 @@ def contract_to_sf26(contract):
     base_value = _fmt_money(c["periods"][0]["ceiling"] if c["periods"] else 0.0)
     accounting = (
         f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-        f"Obligated to date {_fmt_money(c['total_obligated'])} of "
+        f"Obligated to date {_fmt_money(_base_obligation(c))} of "
         f"{_fmt_money(c['total_ceiling'])} ceiling."
     )
     values = {
@@ -747,8 +761,11 @@ def contract_to_sf26(contract):
         _P + "CODE2[0]": c["admin_office_code"],
         # Block 14 accounting and appropriation data.
         _P + "ACCOUNTING14[0]": accounting,
-        # Block 15G: total award (awarded base-year value).
-        _P + "F15TOTAL[0]": base_value,
+        # Block 15G: total award (awarded base-year value). The 15G box on the
+        # SF-26 form already pre-prints a "$", so strip ours here to avoid a
+        # doubled "$$7,066,651.20". (The 15-line-item amount boxes have no
+        # pre-printed $, so _fmt_money keeps its sign for those below.)
+        _P + "F15TOTAL[0]": base_value.lstrip("$"),
         # Block 16 table of contents: Section B (the labor rate schedule) is
         # present on the continuation sheet appended after this page.
         _P + "G15B[0]": "/1",
