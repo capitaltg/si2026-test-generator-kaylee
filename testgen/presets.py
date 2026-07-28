@@ -773,14 +773,19 @@ def contract_to_sf26(contract):
     return values
 
 
-def contract_to_sf30(contract):
-    """Map a contract's latest funding modification onto the real SF-30. The
-    SF-30 documents a change to an existing contract, so we render the most
-    recent mod from the obligation history (falling back to the award)."""
+def contract_to_sf30(contract, mod=None):
+    """Map one funding modification onto the real SF-30. An SF-30 documents a
+    single change to an existing contract, so exactly one mod goes on the form.
+
+    mod  which obligation-history entry to render. Default (None) picks the most
+         recent money-moving mod (falling back to the award) — the one-form view.
+         Pass a specific history entry to render that mod, so a contract's whole
+         trail can be emitted as one SF-30 per mod (see contract_to_sf30_trail)."""
     c = contract
     contractor = c["contractor"]
     history = c["obligation_history"]
-    mod = next((m for m in reversed(history) if m["mod"] != "Award"), history[-1])
+    if mod is None:
+        mod = next((m for m in reversed(history) if m["mod"] != "Award"), history[-1])
     prev_cumulative = _round_money(mod["cumulative_obligated"] - mod["amount"])
     mod_date = _fmt_date(mod["date"])
 
@@ -862,6 +867,22 @@ def contract_to_sf30(contract):
             "and conditions remain unchanged and in full force and effect."
         )
     return values
+
+
+def contract_to_sf30_trail(contract):
+    """One (mod_number, SF-30 field-values) pair per money-moving modification in
+    the contract's obligation history, oldest first, skipping the base Award.
+
+    Lets a single contract export as a SEQUENCE of SF-30s — P00001, P00002 … —
+    each documenting just its own action, so the set rebuilds the funding trail
+    one modification at a time (e.g. dropped into a burn tool's mod-ingest in
+    order). Returns [] when the contract carries no post-award mods."""
+    history = contract["obligation_history"]
+    return [
+        (m["mod"], contract_to_sf30(contract, m))
+        for m in history
+        if m["mod"] != "Award"
+    ]
 
 
 # --- Drawn-document presets (no official form exists) -------------------------
@@ -1549,7 +1570,8 @@ _CONTRACT_OPTS = [
 PRESET_OPTIONS_BY_KEY = {
     "govcon_award_sf1449": _CONTRACT_OPTS,
     "govcon_award_sf26": _CONTRACT_OPTS,
-    "govcon_mod_sf30": _CONTRACT_OPTS,
+    # Only the SF-30 can split its obligation history into one form per mod.
+    "govcon_mod_sf30": _CONTRACT_OPTS + ["split_mods"],
     "govcon_invoice": _CONTRACT_OPTS,
     "govcon_funding_summary": _CONTRACT_OPTS,
     "govcon_award_letter": _CONTRACT_OPTS,
