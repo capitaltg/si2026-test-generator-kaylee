@@ -191,7 +191,9 @@ def build_contract(rng, faker, index, opts=None):
     """Build one internally-consistent contract record (see module docstring).
 
     opts (all optional): agency (name), option_years (0..4), lcat_lines (per
-    labor CLIN). Anything not given is chosen randomly within realistic bounds.
+    labor CLIN), n_mods (exact # of money-moving mods) and mod_types (their
+    types, in order — see _build_obligations). Anything not given is chosen
+    randomly within realistic bounds.
     """
     opts = opts or {}
 
@@ -250,7 +252,9 @@ def build_contract(rng, faker, index, opts=None):
     )
     obligated_fraction = rng.uniform(0.55, 0.9)
     total_obligated = _round_money(exercised_ceiling * obligated_fraction)
-    obligation_history = _build_obligations(rng, effective, total_obligated, periods)
+    obligation_history = _build_obligations(
+        rng, effective, total_obligated, periods, opts
+    )
 
     return {
         "piid": piid,
@@ -483,13 +487,34 @@ def _build_labor_lines(rng, n_lines):
     return lines
 
 
-def _build_obligations(rng, effective, total_obligated, periods):
+_MOD_TYPE_ACTIONS = {
+    "incremental_funding": "Incremental funding (FAR 52.232-22)",
+    "option_exercise": "Exercise option period",
+}
+
+
+def _build_obligations(rng, effective, total_obligated, periods, opts=None):
     """A mod history (award + P00001, P00002 ...) whose amounts sum EXACTLY to
     total_obligated, with a running cumulative. Mods are dated within the
-    exercised periods and after the award."""
+    exercised periods and after the award.
+
+    Opt-in knobs (both optional; unset => the usual random behavior):
+      n_mods    exact number of money-moving mods after the Award (>=0).
+      mod_types list of type keys assigned to those mods in order, cycling if
+                shorter than n_mods. Keys: 'incremental_funding',
+                'option_exercise' (or a literal action string)."""
+    opts = opts or {}
     exercised = [p for p in periods if p["exercised"]]
-    # One funding action per exercised period, plus 0-2 incremental-funding mods.
-    n_actions = max(1, len(exercised) + rng.randint(0, 2))
+    mod_types = opts.get("mod_types") or None
+    if isinstance(mod_types, str):
+        mod_types = [mod_types]  # a single UI pick applies to every mod
+    n_mods = opts.get("n_mods")
+    if n_mods is not None:
+        # +1 for the Award entry itself; every extra entry is one mod.
+        n_actions = max(1, int(n_mods) + 1)
+    else:
+        # One funding action per exercised period, plus 0-2 incremental mods.
+        n_actions = max(1, len(exercised) + rng.randint(0, 2))
 
     # Split total_obligated into n_actions positive increments. Random weights,
     # last increment absorbs the rounding so the sum is exact.
@@ -511,13 +536,20 @@ def _build_obligations(rng, effective, total_obligated, periods):
             mod, action = "Award", "Initial award / base-period funding"
         else:
             mod = f"P{i:05d}"
-            action = rng.choice(
-                [
-                    "Incremental funding (FAR 52.232-22)",
-                    "Exercise option period",
-                    "Administrative modification",
-                ]
-            )
+            # Every entry here carries a positive obligation increment, so the
+            # action must be one that actually moves money — incremental funding
+            # or an option exercise. (A pure administrative modification obligates
+            # nothing, so it has no place in the obligation history.)
+            if mod_types:
+                key = mod_types[(i - 1) % len(mod_types)]
+                action = _MOD_TYPE_ACTIONS.get(key, key)
+            else:
+                action = rng.choice(
+                    [
+                        "Incremental funding (FAR 52.232-22)",
+                        "Exercise option period",
+                    ]
+                )
         history.append(
             {
                 "mod": mod,
@@ -810,7 +842,7 @@ def contract_to_sf30(contract):
         values[_P + "Copies[0]"] = "3"
         values[_P + "CopiesReturned[0]"] = "3"
         values[_P + "Description[0]"] = (
-            f"The purpose of this modification is to exercise {mod['action'].lower()} "
+            f"The purpose of this modification is to {mod['action'].lower()} "
             "in accordance with FAR 52.217-9. Accordingly: (a) The Government "
             f"exercises the option, obligating {_fmt_money(mod['amount'])} "
             f"(cumulative obligated {_fmt_money(mod['cumulative_obligated'])}). "
@@ -1218,12 +1250,16 @@ def _recent_week_ending(rng, earliest=None):
     """A recent Friday (a weekly timesheet's week-ending date).
 
     Normally within the last ~25 weeks. When `earliest` (a date) is given, the
-    week is bounded so it never predates that day — used so timesheet weeks stay
-    inside the period of performance they charge against."""
+    window spans the whole stretch from that day to today — used so timesheet
+    weeks cover the period of performance from its start, not just a trailing
+    ~25-week slice. A PoP that began more than ~25 weeks ago would otherwise show
+    an unlogged gap at the front, leaving a burn tool unable to tell how far into
+    the period the contract actually is."""
     today = datetime.date.today()
-    max_back = 25
     if earliest is not None:
-        max_back = min(max_back, max(0, (today - earliest).days // 7))
+        max_back = max(0, (today - earliest).days // 7)
+    else:
+        max_back = 25
     day = today - datetime.timedelta(weeks=rng.randint(0, max_back))
     friday = day - datetime.timedelta(days=(day.weekday() - 4) % 7)
     # Rounding back to the week's Friday can land just before `earliest` (the
@@ -1507,6 +1543,8 @@ _CONTRACT_OPTS = [
     "set_aside",
     "option_years",
     "lcat_lines",
+    "n_mods",
+    "mod_types",
 ]
 PRESET_OPTIONS_BY_KEY = {
     "govcon_award_sf1449": _CONTRACT_OPTS,

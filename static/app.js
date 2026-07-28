@@ -458,6 +458,25 @@ const PRESET_OPTIONS = [
     max: 8,
   },
   {
+    key: "n_mods",
+    type: "number",
+    label: "Modifications",
+    hint: "How many post-award funding modifications (P00001, P00002 …) the obligation history carries. 0 = award only, no mods. Blank = random.",
+    min: 0,
+    max: 12,
+  },
+  {
+    key: "mod_types",
+    type: "select",
+    label: "Modification types",
+    hint: "What those modifications do. 'Any' mixes them randomly; pin one to make every mod that kind (e.g. three incremental-funding mods for a funding-pace demo).",
+    choices: [
+      ["", "Any (random mix)"],
+      ["incremental_funding", "Incremental funding only"],
+      ["option_exercise", "Option exercises only"],
+    ],
+  },
+  {
     key: "staffing",
     type: "number",
     label: "Staffing level",
