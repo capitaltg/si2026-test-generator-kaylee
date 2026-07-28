@@ -191,7 +191,9 @@ def build_contract(rng, faker, index, opts=None):
     """Build one internally-consistent contract record (see module docstring).
 
     opts (all optional): agency (name), option_years (0..4), lcat_lines (per
-    labor CLIN). Anything not given is chosen randomly within realistic bounds.
+    labor CLIN), n_mods (exact # of money-moving mods) and mod_types (their
+    types, in order — see _build_obligations). Anything not given is chosen
+    randomly within realistic bounds.
     """
     opts = opts or {}
 
@@ -250,7 +252,9 @@ def build_contract(rng, faker, index, opts=None):
     )
     obligated_fraction = rng.uniform(0.55, 0.9)
     total_obligated = _round_money(exercised_ceiling * obligated_fraction)
-    obligation_history = _build_obligations(rng, effective, total_obligated, periods)
+    obligation_history = _build_obligations(
+        rng, effective, total_obligated, periods, opts
+    )
 
     return {
         "piid": piid,
@@ -483,13 +487,34 @@ def _build_labor_lines(rng, n_lines):
     return lines
 
 
-def _build_obligations(rng, effective, total_obligated, periods):
+_MOD_TYPE_ACTIONS = {
+    "incremental_funding": "Incremental funding (FAR 52.232-22)",
+    "option_exercise": "Exercise option period",
+}
+
+
+def _build_obligations(rng, effective, total_obligated, periods, opts=None):
     """A mod history (award + P00001, P00002 ...) whose amounts sum EXACTLY to
     total_obligated, with a running cumulative. Mods are dated within the
-    exercised periods and after the award."""
+    exercised periods and after the award.
+
+    Opt-in knobs (both optional; unset => the usual random behavior):
+      n_mods    exact number of money-moving mods after the Award (>=0).
+      mod_types list of type keys assigned to those mods in order, cycling if
+                shorter than n_mods. Keys: 'incremental_funding',
+                'option_exercise' (or a literal action string)."""
+    opts = opts or {}
     exercised = [p for p in periods if p["exercised"]]
-    # One funding action per exercised period, plus 0-2 incremental-funding mods.
-    n_actions = max(1, len(exercised) + rng.randint(0, 2))
+    mod_types = opts.get("mod_types") or None
+    if isinstance(mod_types, str):
+        mod_types = [mod_types]  # a single UI pick applies to every mod
+    n_mods = opts.get("n_mods")
+    if n_mods is not None:
+        # +1 for the Award entry itself; every extra entry is one mod.
+        n_actions = max(1, int(n_mods) + 1)
+    else:
+        # One funding action per exercised period, plus 0-2 incremental mods.
+        n_actions = max(1, len(exercised) + rng.randint(0, 2))
 
     # Split total_obligated into n_actions positive increments. Random weights,
     # last increment absorbs the rounding so the sum is exact.
@@ -511,13 +536,20 @@ def _build_obligations(rng, effective, total_obligated, periods):
             mod, action = "Award", "Initial award / base-period funding"
         else:
             mod = f"P{i:05d}"
-            action = rng.choice(
-                [
-                    "Incremental funding (FAR 52.232-22)",
-                    "Exercise option period",
-                    "Administrative modification",
-                ]
-            )
+            # Every entry here carries a positive obligation increment, so the
+            # action must be one that actually moves money — incremental funding
+            # or an option exercise. (A pure administrative modification obligates
+            # nothing, so it has no place in the obligation history.)
+            if mod_types:
+                key = mod_types[(i - 1) % len(mod_types)]
+                action = _MOD_TYPE_ACTIONS.get(key, key)
+            else:
+                action = rng.choice(
+                    [
+                        "Incremental funding (FAR 52.232-22)",
+                        "Exercise option period",
+                    ]
+                )
         history.append(
             {
                 "mod": mod,
@@ -555,6 +587,20 @@ def _fmt_money(value):
 
 def _fmt_date(d):
     return d.strftime("%Y-%m-%d") if isinstance(d, datetime.date) else str(d)
+
+
+def _base_obligation(c):
+    """The dollars obligated on the base award itself — the first ("Award") entry
+    of the obligation history. An award form (SF-26 / SF-1449) must show what was
+    obligated *at award*, not the running total after later SF-30 mods; the mods
+    carry the increases on top (see _build_obligations). Ingesting the award alone
+    should therefore read the base obligation, and the mod trail should rebuild up
+    to total_obligated. Falls back to total_obligated for any contract with no
+    mod history."""
+    history = c.get("obligation_history") or []
+    if history:
+        return history[0]["cumulative_obligated"]
+    return c["total_obligated"]
 
 
 def _setaside_boxes(set_aside):
@@ -608,7 +654,7 @@ def contract_to_sf1449(contract):
         _P
         + "accountingdata[0]": (
             f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-            f"Obligated to date {_fmt_money(c['total_obligated'])} of "
+            f"Obligated to date {_fmt_money(_base_obligation(c))} of "
             f"{_fmt_money(c['total_ceiling'])} ceiling."
         ),
         # Block 26 total award = the awarded (base-year) value.
@@ -685,7 +731,7 @@ def contract_to_sf26(contract):
     base_value = _fmt_money(c["periods"][0]["ceiling"] if c["periods"] else 0.0)
     accounting = (
         f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-        f"Obligated to date {_fmt_money(c['total_obligated'])} of "
+        f"Obligated to date {_fmt_money(_base_obligation(c))} of "
         f"{_fmt_money(c['total_ceiling'])} ceiling."
     )
     values = {
@@ -715,8 +761,11 @@ def contract_to_sf26(contract):
         _P + "CODE2[0]": c["admin_office_code"],
         # Block 14 accounting and appropriation data.
         _P + "ACCOUNTING14[0]": accounting,
-        # Block 15G: total award (awarded base-year value).
-        _P + "F15TOTAL[0]": base_value,
+        # Block 15G: total award (awarded base-year value). The 15G box on the
+        # SF-26 form already pre-prints a "$", so strip ours here to avoid a
+        # doubled "$$7,066,651.20". (The 15-line-item amount boxes have no
+        # pre-printed $, so _fmt_money keeps its sign for those below.)
+        _P + "F15TOTAL[0]": base_value.lstrip("$"),
         # Block 16 table of contents: Section B (the labor rate schedule) is
         # present on the continuation sheet appended after this page.
         _P + "G15B[0]": "/1",
@@ -741,14 +790,19 @@ def contract_to_sf26(contract):
     return values
 
 
-def contract_to_sf30(contract):
-    """Map a contract's latest funding modification onto the real SF-30. The
-    SF-30 documents a change to an existing contract, so we render the most
-    recent mod from the obligation history (falling back to the award)."""
+def contract_to_sf30(contract, mod=None):
+    """Map one funding modification onto the real SF-30. An SF-30 documents a
+    single change to an existing contract, so exactly one mod goes on the form.
+
+    mod  which obligation-history entry to render. Default (None) picks the most
+         recent money-moving mod (falling back to the award) — the one-form view.
+         Pass a specific history entry to render that mod, so a contract's whole
+         trail can be emitted as one SF-30 per mod (see contract_to_sf30_trail)."""
     c = contract
     contractor = c["contractor"]
     history = c["obligation_history"]
-    mod = next((m for m in reversed(history) if m["mod"] != "Award"), history[-1])
+    if mod is None:
+        mod = next((m for m in reversed(history) if m["mod"] != "Award"), history[-1])
     prev_cumulative = _round_money(mod["cumulative_obligated"] - mod["amount"])
     mod_date = _fmt_date(mod["date"])
 
@@ -810,7 +864,7 @@ def contract_to_sf30(contract):
         values[_P + "Copies[0]"] = "3"
         values[_P + "CopiesReturned[0]"] = "3"
         values[_P + "Description[0]"] = (
-            f"The purpose of this modification is to exercise {mod['action'].lower()} "
+            f"The purpose of this modification is to {mod['action'].lower()} "
             "in accordance with FAR 52.217-9. Accordingly: (a) The Government "
             f"exercises the option, obligating {_fmt_money(mod['amount'])} "
             f"(cumulative obligated {_fmt_money(mod['cumulative_obligated'])}). "
@@ -830,6 +884,22 @@ def contract_to_sf30(contract):
             "and conditions remain unchanged and in full force and effect."
         )
     return values
+
+
+def contract_to_sf30_trail(contract):
+    """One (mod_number, SF-30 field-values) pair per money-moving modification in
+    the contract's obligation history, oldest first, skipping the base Award.
+
+    Lets a single contract export as a SEQUENCE of SF-30s — P00001, P00002 … —
+    each documenting just its own action, so the set rebuilds the funding trail
+    one modification at a time (e.g. dropped into a burn tool's mod-ingest in
+    order). Returns [] when the contract carries no post-award mods."""
+    history = contract["obligation_history"]
+    return [
+        (m["mod"], contract_to_sf30(contract, m))
+        for m in history
+        if m["mod"] != "Award"
+    ]
 
 
 # --- Drawn-document presets (no official form exists) -------------------------
@@ -1218,12 +1288,16 @@ def _recent_week_ending(rng, earliest=None):
     """A recent Friday (a weekly timesheet's week-ending date).
 
     Normally within the last ~25 weeks. When `earliest` (a date) is given, the
-    week is bounded so it never predates that day — used so timesheet weeks stay
-    inside the period of performance they charge against."""
+    window spans the whole stretch from that day to today — used so timesheet
+    weeks cover the period of performance from its start, not just a trailing
+    ~25-week slice. A PoP that began more than ~25 weeks ago would otherwise show
+    an unlogged gap at the front, leaving a burn tool unable to tell how far into
+    the period the contract actually is."""
     today = datetime.date.today()
-    max_back = 25
     if earliest is not None:
-        max_back = min(max_back, max(0, (today - earliest).days // 7))
+        max_back = max(0, (today - earliest).days // 7)
+    else:
+        max_back = 25
     day = today - datetime.timedelta(weeks=rng.randint(0, max_back))
     friday = day - datetime.timedelta(days=(day.weekday() - 4) % 7)
     # Rounding back to the week's Friday can land just before `earliest` (the
@@ -1507,11 +1581,14 @@ _CONTRACT_OPTS = [
     "set_aside",
     "option_years",
     "lcat_lines",
+    "n_mods",
+    "mod_types",
 ]
 PRESET_OPTIONS_BY_KEY = {
     "govcon_award_sf1449": _CONTRACT_OPTS,
     "govcon_award_sf26": _CONTRACT_OPTS,
-    "govcon_mod_sf30": _CONTRACT_OPTS,
+    # Only the SF-30 can split its obligation history into one form per mod.
+    "govcon_mod_sf30": _CONTRACT_OPTS + ["split_mods"],
     "govcon_invoice": _CONTRACT_OPTS,
     "govcon_funding_summary": _CONTRACT_OPTS,
     "govcon_award_letter": _CONTRACT_OPTS,

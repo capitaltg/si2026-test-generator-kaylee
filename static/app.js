@@ -458,6 +458,31 @@ const PRESET_OPTIONS = [
     max: 8,
   },
   {
+    key: "n_mods",
+    type: "number",
+    label: "Modifications",
+    hint: "How many post-award funding modifications (P00001, P00002 …) the obligation history carries. 0 = award only, no mods. Blank = random.",
+    min: 0,
+    max: 12,
+  },
+  {
+    key: "mod_types",
+    type: "select",
+    label: "Modification types",
+    hint: "What those modifications do. 'Any' mixes them randomly; pin one to make every mod that kind (e.g. three incremental-funding mods for a funding-pace demo).",
+    choices: [
+      ["", "Any (random mix)"],
+      ["incremental_funding", "Incremental funding only"],
+      ["option_exercise", "Option exercises only"],
+    ],
+  },
+  {
+    key: "split_mods",
+    type: "bool",
+    label: "One SF-30 per mod (ZIP)",
+    hint: "Emit the whole obligation trail as a sequence of SF-30s — one PDF per mod (P00001, P00002 …) from a single contract — instead of one form per contract. Preview shows them stacked; Export downloads a ZIP you can feed a mod-ingest one file at a time.",
+  },
+  {
     key: "staffing",
     type: "number",
     label: "Staffing level",
@@ -634,9 +659,16 @@ function renderRowsCtrl() {
   // The count means different things per context, so label it accordingly:
   // separate generated documents are "Copies"; the PDF doc-per-row tab is
   // "Docs"; everything else is table "Rows".
+  // SF-30 "one per mod" mode decides the form count from the Modifications knob
+  // (one SF-30 per mod of a single contract), so the copies control does nothing
+  // here — lock it and say why, rather than let it mislead.
+  const splitMods = state.preset === "govcon_mod_sf30" && !!state.presetOpts.split_mods;
   const lbl = $("#rowsLbl");
   if (lbl) {
-    if (state.preset && state.presetKind !== "data") lbl.textContent = "Copies";
+    // A form/doc preset produces N independent documents; call it "Documents"
+    // (clearer than "Copies", which read as duplicates of one).
+    if (splitMods) lbl.textContent = "Documents";
+    else if (state.preset && state.presetKind !== "data") lbl.textContent = "Documents";
     else if (!state.preset && state.outputTab === "pdf" && state.pdfMode === "docs") lbl.textContent = "Docs";
     else lbl.textContent = "Rows";
   }
@@ -646,9 +678,18 @@ function renderRowsCtrl() {
   const sel = $("#rowSelect");
   const box = $("#rowCount");
   if (isPreset) sel.value = String(rc);
-  sel.classList.toggle("active", isPreset);
-  box.classList.toggle("active", !isPreset);
+  sel.classList.toggle("active", isPreset && !splitMods);
+  box.classList.toggle("active", !isPreset && !splitMods);
   box.value = isPreset ? "" : state.rowCount;
+  const ctrl = $("#rowsCtrl");
+  if (ctrl) {
+    ctrl.classList.toggle("locked", splitMods);
+    ctrl.title = splitMods
+      ? "One SF-30 per mod: the count comes from “Modifications” in the options panel, not copies."
+      : "";
+  }
+  sel.disabled = splitMods;
+  box.disabled = splitMods;
 }
 
 function cellHtml(value) {
@@ -896,8 +937,10 @@ function selectPreset(key, presetOpts = {}) {
     if (!p) return;
     state.preset = key;
     state.presetKind = p.kind;
-    // Forms are heavy (one filled form per row); default to a sensible few.
-    if (p.kind === "form" && Number(state.rowCount) > 10) state.rowCount = 3;
+    // A form/doc preset is almost always viewed one at a time (and each copy is
+    // a whole filled document), so default to a single document — bump
+    // "Documents" only when you actually want a batch of distinct ones.
+    if (p.kind === "form" || p.kind === "doc") state.rowCount = 1;
     // A data preset has no PDF tab; if PDF was active, fall back to the table.
     if (p.kind === "data" && state.outputTab === "pdf") state.outputTab = "table";
   }
@@ -1337,13 +1380,22 @@ async function generate() {
 // presets don't come here — they render through the format tabs like the builder.)
 async function generatePreset(total) {
   const body = $("#outputBody");
-  $("#statRows").textContent = total.toLocaleString() + " docs";
+  $("#statRows").textContent = total.toLocaleString() + (total === 1 ? " doc" : " docs");
   $("#statNote").textContent = "";
   $("#statMs").textContent = ""; // form/doc presets aren't timed row generations
+  // SF-30 "one per mod" mode ignores the record count: it previews a single
+  // contract's whole mod trail stacked into one PDF, and exports it as a ZIP.
+  const splitMods = state.preset === "govcon_mod_sf30" && !!state.presetOpts.split_mods;
+  const hint = splitMods
+    ? `One SF-30 per modification from a single contract's obligation trail ` +
+      `(P00001, P00002 …). Preview stacks them; Export downloads a ZIP of ` +
+      `separate PDFs.`
+    : `Filled real form — one copy per record, each with generated, reconciling data. ` +
+      `Hit Randomize to re-roll; click Export to download.`;
   body.innerHTML =
     `<div class="pdf-pane"><div class="pdf-controls"><div class="pdf-hint">` +
-    `Filled real form — one copy per record, each with generated, reconciling data. ` +
-    `Hit Randomize to re-roll; click Export to download.</div></div>` +
+    hint +
+    `</div></div>` +
     `<div class="pdf-preview"><iframe id="pdfFrame" title="Form preview"></iframe>` +
     `<div class="pdf-preview-note" id="pdfNote">Building preview…</div></div></div>`;
   try {
@@ -1353,7 +1405,10 @@ async function generatePreset(total) {
     lastPdfUrl = URL.createObjectURL(blob);
     $("#pdfFrame").src = lastPdfUrl + "#toolbar=0&navpanes=0&view=FitH";
     const note = $("#pdfNote");
-    if (note) note.textContent = total > 5 ? `Preview · first 5 of ${total} forms · Export for all` : `Preview · ${total} form${total === 1 ? "" : "s"}`;
+    if (note) {
+      if (splitMods) note.textContent = "Preview · one SF-30 per mod · Export for the ZIP";
+      else note.textContent = total > 5 ? `Preview · first 5 of ${total} forms · Export for all` : `Preview · ${total} form${total === 1 ? "" : "s"}`;
+    }
   } catch (e) {
     const note = $("#pdfNote");
     if (note) note.textContent = "Preview error: " + e.message;
@@ -1405,6 +1460,15 @@ async function saveExport(format, ext, extra) {
   toast("Downloaded " + a.download);
 }
 
+// Pull the download filename the server suggested (Content-Disposition), so an
+// export whose extension the server decides (e.g. a .zip of SF-30s) saves with
+// the right name. Falls back to the caller's name when the header is absent.
+function filenameFromResp(resp, fallback) {
+  const cd = resp.headers && resp.headers.get("Content-Disposition");
+  const m = cd && /filename="?([^"]+)"?/.exec(cd);
+  return (m && m[1]) || fallback;
+}
+
 async function download() {
   // Export follows the active output tab. For PDF the Table/Doc toggle picks the
   // flavour; document mode passes a light pdf_config (the seam where a richer,
@@ -1413,11 +1477,16 @@ async function download() {
   if (state.preset) {
     try {
       if (state.presetKind !== "data") {
-        const resp = await postJSON("/export", presetReqBody(Math.min(Number(state.rowCount) || 1, 200)));
+        // The SF-30 "one per mod" option downloads a ZIP of separate PDFs; the
+        // server names it, so honor the Content-Disposition filename it returns.
+        const body = presetReqBody(Math.min(Number(state.rowCount) || 1, 200));
+        const zipMods = state.preset === "govcon_mod_sf30" && !!state.presetOpts.split_mods;
+        if (zipMods) body.format = "zip";
+        const resp = await postJSON("/export", body);
         const blob = await resp.blob();
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
-        a.download = state.preset + ".pdf";
+        a.download = filenameFromResp(resp, state.preset + (zipMods ? ".zip" : ".pdf"));
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -1778,6 +1847,8 @@ function wireEvents() {
     }
     // Staffing resizes the roster, so snap the row count to it on the next run.
     if (key === "staffing") state.autoSizeRows = true;
+    // Toggling "one SF-30 per mod" locks/unlocks the copies control.
+    if (key === "split_mods") renderRowsCtrl();
     state.exportCache = {};
     generate();
   });

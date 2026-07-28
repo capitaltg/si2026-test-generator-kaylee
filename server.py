@@ -24,7 +24,9 @@ only because pydantic reserves some schema-related names.
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -35,6 +37,7 @@ from pydantic import BaseModel, ConfigDict
 from testgen import (
     PRESETS,
     field_type_groups,
+    fill_form_bytes,
     fill_forms_bytes,
     generate,
     generate_preset,
@@ -54,6 +57,7 @@ from testgen.infer import (
     infer_json_sample,
     parse_ddl,
 )
+from testgen.presets import contract_to_sf30_trail
 
 app = FastAPI(title="Fixtura API", version="0.1.0")
 
@@ -223,6 +227,53 @@ def export(req: ExportRequest) -> Response:
     # requested `format`. The mapping turns each consistent record into the
     # form's field values.
     preset_kind = PRESETS.get(req.preset, {}).get("kind") if req.preset else None
+
+    # SF-30 "mod trail" mode: take ONE contract and emit a separate SF-30 per
+    # money-moving mod in its obligation history (P00001, P00002 …) rather than
+    # one form per contract. `format="zip"` downloads one PDF per mod — ready to
+    # feed a mod-ingest one at a time; anything else (the in-app preview) returns
+    # a single combined PDF, one SF-30 page-set per mod.
+    if req.preset == "govcon_mod_sf30" and (req.preset_opts or {}).get("split_mods"):
+        try:
+            records = generate_preset(
+                req.preset, rows=1, seed=req.seed, opts=req.preset_opts
+            )
+        except (ValueError, KeyError) as error:
+            raise HTTPException(status_code=400, detail=str(error))
+        trail = contract_to_sf30_trail(records[0]) if records else []
+        if not trail:
+            raise HTTPException(
+                status_code=400,
+                detail="This contract has no modifications to split into "
+                "SF-30s — set Modifications to 1 or more.",
+            )
+        piid = records[0].get("piid", "contract")
+        if req.format == "zip":
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+                for mod_no, values in trail:
+                    archive.writestr(
+                        f"{piid}.{mod_no}.sf30.pdf",
+                        fill_form_bytes("SF30.pdf", values),
+                    )
+            return Response(
+                content=buf.getvalue(),
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": (
+                        f'attachment; filename="{piid}.sf30-mods.zip"'
+                    )
+                },
+            )
+        content = fill_forms_bytes("SF30.pdf", [values for _, values in trail])
+        return Response(
+            content=content,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{piid}.sf30-mods.pdf"'
+            },
+        )
+
     if preset_kind in ("form", "doc"):
         records = _make_rows(req)
         preset = PRESETS[req.preset]

@@ -315,6 +315,12 @@ body {
 .rows-ctrl select.active,
 .rows-ctrl input.active { border-color: var(--accent); background: #eef4fb; color: var(--accent-dark); font-weight: 600; }
 
+/* Locked: the count is decided elsewhere (e.g. SF-30 "one per mod" takes its
+   count from the Modifications knob), so the copies control is greyed out. */
+.rows-ctrl.locked { opacity: .45; }
+.rows-ctrl.locked select,
+.rows-ctrl.locked input { cursor: not-allowed; background: #f3f5f8; }
+
 /* PDF Table/Doc toggle: a small segmented control, same visual language as the
    row-count presets so the output bar reads as one family of controls. */
 .pdf-ctrl { display: inline-flex; gap: 2px; background: var(--bg); border-radius: 7px; padding: 2px; }
