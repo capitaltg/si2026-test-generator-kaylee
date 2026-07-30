@@ -11,8 +11,10 @@ Run it (from the repo root):
     uvicorn server:app --reload          # dev server with auto-reload
     # or simply:  python3 server.py
 
-Then the API lives at http://127.0.0.1:8000 . The endpoints:
+Then the API lives at http://127.0.0.1:8000 . (To run it in a container
+instead, see the Dockerfile.) The endpoints:
 
+    GET  /health        a cheap liveness check for deploy tooling
     GET  /field-types   the grouped type menu for the dropdown
     POST /generate      { fields, rows, seed } -> { rows: [...] }
     POST /export        { fields, rows, seed, format, table } -> a file download
@@ -32,7 +34,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from testgen import (
     PRESETS,
@@ -79,6 +81,14 @@ async def _revalidate_html(request, call_next):
     return response
 
 
+# The most rows one request may ask for. Generation is entirely in memory, so an
+# unbounded `rows` lets a single request ("rows": 5000000) exhaust the process —
+# which matters once this is served on a public URL. 50,000 is not a new product
+# limit: it is the ceiling the front end already enforces on every export
+# (static/app.js), restated on the server so the API can't be walked past it.
+MAX_ROWS = 50_000
+
+
 # --- Request shapes ----------------------------------------------------------
 
 
@@ -98,7 +108,9 @@ class GenerateRequest(BaseModel):
     # GovCon document template). When preset is set, fields may be empty and the
     # preset's builder produces each row instead.
     fields: List[FieldSpec] = []
-    rows: int = 25
+    # ge=0 rather than ge=1: the front end sends 0 when the row box is empty,
+    # and that has always returned an empty dataset rather than an error.
+    rows: int = Field(25, ge=0, le=MAX_ROWS)
     seed: Optional[int] = 42
     preset: Optional[str] = None
     preset_opts: Optional[dict] = None
@@ -150,6 +162,15 @@ def _make_rows(req: GenerateRequest) -> List[dict]:
 
 
 # --- Endpoints ---------------------------------------------------------------
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness check for deploy tooling (load balancers, container health
+    probes). Deliberately does no work: the alternatives a probe could poll are
+    the static index or an endpoint that generates data, and neither should run
+    every few seconds just to answer "is the process up?"."""
+    return {"status": "ok"}
 
 
 @app.get("/field-types")

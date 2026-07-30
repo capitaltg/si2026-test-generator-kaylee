@@ -1,0 +1,38 @@
+# Files excluded from the "build context" — the copy of this repo that gets
+# handed to Docker when you run `docker build`. Everything listed here is either
+# useless at runtime or actively unwanted inside an image layer. A smaller
+# context means faster builds and a smaller image.
+
+# Git history: large, and never needed to run the app.
+.git
+.gitignore
+.dockerignore
+Dockerfile
+
+# Local Python caches and build leftovers. These are built for the host's
+# Python/OS; letting them into the image risks shadowing what pip installs.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Editor and OS noise.
+.vscode/
+.idea/
+.DS_Store
+
+# Development-only material. The image only needs the app; tests and docs stay
+# in the repo. (To run the suite against the image, mount tests/ in — see the
+# comment at the bottom of the Dockerfile.)
+tests/
+docs/
+ROADMAP.md
+
+# Never let a local env file get baked into a published image.
+.env
+.env.*
