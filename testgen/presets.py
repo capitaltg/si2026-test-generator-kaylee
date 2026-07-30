@@ -1308,6 +1308,47 @@ def _recent_week_ending(rng, earliest=None):
     return _fmt_date(friday)
 
 
+_SHARED_POOL_SEED = 8675309
+_SHARED_POOL_SIZE = 80
+
+
+def _shared_pool():
+    """A fixed, seed-stable pool of people reused across contracts when
+    opts.shared_pool is on, so the same employee can appear on more than one
+    contract. That overlap is what lets a portfolio tool flag anyone booked past
+    100% across contracts. Off by default — each contract keeps its own roster."""
+    fk = Faker()
+    fk.seed_instance(_SHARED_POOL_SEED)
+    return [_employee(fk) for _ in range(_SHARED_POOL_SIZE)]
+
+
+def _week_list(earliest=None):
+    """The ordered list of weekly-timesheet Fridays (as YYYY-MM-DD strings) that a
+    timesheet grid spans: from `earliest` (the PoP start, aligned forward to its
+    first Friday) through the most recent past Friday, else the last ~25 weeks.
+
+    This is the deterministic backbone of the one-row-per-person-per-week grid —
+    `_timesheet_row` indexes into it so a person is never double-booked in a week.
+    Mirrors `_recent_week_ending`'s Friday rounding and forward-roll so weeks never
+    start before the period they charge."""
+    today = datetime.date.today()
+    last_friday = today - datetime.timedelta(days=(today.weekday() - 4) % 7)
+    if last_friday > today:
+        last_friday -= datetime.timedelta(days=7)
+    if earliest is not None:
+        first = earliest - datetime.timedelta(days=(earliest.weekday() - 4) % 7)
+        if first < earliest:
+            first += datetime.timedelta(days=7)
+    else:
+        first = last_friday - datetime.timedelta(weeks=25)
+    weeks = []
+    d = first
+    while d <= last_friday:
+        weeks.append(_fmt_date(d))
+        d += datetime.timedelta(days=7)
+    return weeks or [_fmt_date(last_friday)]
+
+
 def build_scenario(seed, opts=None):
     """A seed-stable 'scenario' the labor exports share: one contract plus a
     billing roster mapped to its base-year labor CLINs.
@@ -1343,6 +1384,22 @@ def build_scenario(seed, opts=None):
     # factor that's one person per line (the original shape); with one, each line
     # is crewed to round(staffing * its FTE count) people so the logged hours the
     # timesheet/labor exports roll up actually reflect that staffing level.
+    # Opt-in shared roster: about every third person is drawn from a fixed
+    # cross-contract pool (offset by PIID) so a realistic handful recur on other
+    # contracts — the rest stay unique to this contract. That partial overlap is
+    # what the portfolio conflict detector reads; LCAT/CLIN/rate stay this
+    # contract's. (Sharing everyone would read as "all staff booked 500%".)
+    pool = _shared_pool() if (opts or {}).get("shared_pool") else None
+    # Spread each contract's shared block across the pool (×7 decorrelates similar
+    # PIIDs) so shared people mostly land on just two contracts, not all of them.
+    pool_offset = (
+        (sum(ord(ch) for ch in (contract.get("piid") or "")) * 7) % len(pool)
+        if pool
+        else 0
+    )
+    seat = 0  # roster seat counter; every 4th seat is a shared-pool person
+    shared_k = 0
+
     roster = []
     base = contract["periods"][0]["clins"] if contract["periods"] else []
     for clin in base:
@@ -1353,7 +1410,15 @@ def build_scenario(seed, opts=None):
             else:
                 n_people = 1
             for _ in range(n_people):
-                name, emp_id = _employee(faker)
+                if pool and seat % 5 == 0:
+                    # Scatter shared picks across the pool (stride 13, coprime to
+                    # 80) so a shared person usually lands on just a couple of
+                    # contracts rather than a contiguous block hitting them all.
+                    name, emp_id = pool[(pool_offset + shared_k * 13) % len(pool)]
+                    shared_k += 1
+                else:
+                    name, emp_id = _employee(faker)
+                seat += 1
                 roster.append(
                     {
                         "employee": name,
@@ -1364,7 +1429,16 @@ def build_scenario(seed, opts=None):
                         "bill_rate": line["loaded_rate"],
                     }
                 )
-    return {"contract": contract, "roster": roster}
+    # The timesheet grid's week axis: the PoP window when it's in progress, else a
+    # trailing ~25 weeks. Precomputed once so _timesheet_row can lay one row per
+    # person per week without re-deriving (or re-randomising) the window per row.
+    earliest = None
+    if (opts or {}).get("pop_in_progress"):
+        periods = contract.get("periods") or []
+        if periods:
+            earliest = periods[0]["pop_start"]
+    weeks = _week_list(earliest)
+    return {"contract": contract, "roster": roster, "weeks": weeks}
 
 
 def _scenario_member(opts, index):
@@ -1428,33 +1502,58 @@ def _labor_export_row(rng, faker, index, opts=None):
 def _timesheet_row(rng, faker, index, opts=None):
     """One weekly employee timesheet line: hours booked to a charge code (CLIN),
     split into regular / overtime / leave. A real timesheet carries NO bill rate
-    (that is proprietary and lives on the billing side), so this one doesn't. With
-    a shared scenario, the person and charge code match the labor export and the
-    awarded contract; the hours are re-rolled so each week differs."""
+    (that is proprietary and lives on the billing side), so this one doesn't.
+
+    With a shared scenario the rows form a GRID — one line per person per week —
+    rather than independent random draws, so a person is never double-booked in a
+    week (the old behaviour stacked 2-4 timecards on a person-week, inflating the
+    apparent hours far past 40). Row `index` maps to (person, week) as
+    person = index % roster_size, week = weeks[(index // roster_size) % n_weeks];
+    generate_preset caps the row count at roster_size * n_weeks so the grid never
+    wraps back onto itself.
+
+    Hours default to a standard ~40-hour week with occasional PTO and light
+    overtime, and are tunable per the scenario opts:
+      * target_hours (default 40) — the regular weekly target.
+      * ot_freq (default 0.35)    — chance a week carries overtime (2-8 hrs)."""
     piid, member = _scenario_member(opts, index)
+    scenario = (opts or {}).get("_scenario")
     if member:
         name, emp_id = member["employee"], member["employee_id"]
         lcat, clin = member["labor_category"], member["clin"]
+        weeks = (scenario or {}).get("weeks") or []
+        if weeks:
+            roster_n = len(scenario["roster"]) or 1
+            week_ending = weeks[(index // roster_n) % len(weeks)]
+        else:
+            week_ending = _recent_week_ending(
+                rng,
+                earliest=(
+                    _scenario_base_pop_start(opts)
+                    if opts and opts.get("pop_in_progress")
+                    else None
+                ),
+            )
     else:
         spec = rng.choice(_LCATS)
         piid, clin = _charge_ref(rng, faker)
         name, emp_id = _employee(faker)
         lcat = spec["lcat"]
-    # Regular + leave make up a standard 40-hour week; overtime is on top.
-    leave = float(rng.choice([0, 0, 0, 0, 0, 8, 16]))
-    reg = round(40.0 - leave, 1)
-    ot = float(rng.choice([0, 0, 0, 0, 2, 4, 6, 8]))
+        week_ending = _recent_week_ending(rng)
+
+    _target = (opts or {}).get("target_hours")
+    target = float(_target) if _target not in (None, "") else 40.0
+    _otf = (opts or {}).get("ot_freq")
+    ot_freq = float(_otf) if _otf not in (None, "") else 0.35
+    # Regular hours make the target week (less any PTO that week); overtime rides
+    # on top when it occurs. PTO is occasional, so most weeks land right at target.
+    leave = float(rng.choice([0, 0, 0, 0, 0, 0, 8, 16]))
+    reg = round(max(0.0, target - leave), 1)
+    ot = float(rng.choice([2, 4, 6, 8])) if rng.random() < ot_freq else 0.0
     return {
         "employee": name,
         "employee_id": emp_id,
-        "week_ending": _recent_week_ending(
-            rng,
-            earliest=(
-                _scenario_base_pop_start(opts)
-                if opts and opts.get("pop_in_progress")
-                else None
-            ),
-        ),
+        "week_ending": week_ending,
         "contract_no": piid,
         "charge_code": clin,
         "labor_category": lcat,
@@ -1565,6 +1664,9 @@ PRESETS = {
         "kind": "data",
         "build": _timesheet_row,
         "scenario": True,
+        # One row per person per week — generate_preset caps the row count at the
+        # roster x weeks grid so a person is never double-booked in a week.
+        "grid_weekly": True,
     },
 }
 
@@ -1594,8 +1696,8 @@ PRESET_OPTIONS_BY_KEY = {
     "govcon_award_letter": _CONTRACT_OPTS,
     "govcon_record_sheet": _CONTRACT_OPTS,
     "govcon_contract_data": _CONTRACT_OPTS,
-    "govcon_labor_export": ["staffing"],
-    "govcon_timesheet": ["staffing"],
+    "govcon_labor_export": ["staffing", "shared_pool"],
+    "govcon_timesheet": ["staffing", "target_hours", "ot_freq", "shared_pool"],
 }
 
 
@@ -1625,6 +1727,18 @@ def scenario_roster_size(key, *, seed=None, opts=None):
     return len(build_scenario(seed, base_opts)["roster"])
 
 
+def scenario_grid_size(key, *, seed=None, opts=None):
+    """For a weekly-grid preset (the timesheet), the total row count of a full
+    grid — one row per person per week (roster x weeks). This is the number of
+    rows to request to get every person's every week exactly once; larger
+    requests are capped to it. None when the preset isn't a weekly grid."""
+    if not PRESETS.get(key, {}).get("grid_weekly"):
+        return None
+    base_opts = {k: v for k, v in (opts or {}).items() if not k.startswith("_")}
+    sc = build_scenario(seed, base_opts)
+    return len(sc["roster"]) * max(1, len(sc.get("weeks") or []))
+
+
 def generate_preset(key, *, rows=5, seed=None, opts=None):
     """Generate `rows` consistent records for a preset, reproducibly.
 
@@ -1649,8 +1763,17 @@ def generate_preset(key, *, rows=5, seed=None, opts=None):
         base_opts = {k: v for k, v in opts.items() if not k.startswith("_")}
         opts["_scenario"] = build_scenario(seed, base_opts)
 
+    n = max(0, rows)
+    # A weekly-grid preset lays exactly one row per person per week; cap the
+    # request at that grid so asking for "a lot" yields a full, clean grid instead
+    # of wrapping around and double-booking people (the old hour-inflating bug).
+    if PRESETS[key].get("grid_weekly") and opts.get("_scenario"):
+        sc = opts["_scenario"]
+        grid = len(sc["roster"]) * max(1, len(sc.get("weeks") or []))
+        n = min(n, grid)
+
     build = PRESETS[key]["build"]
-    return [build(rng, faker, i, opts) for i in range(max(0, rows))]
+    return [build(rng, faker, i, opts) for i in range(n)]
 
 
 def preset_form_values(key, record):

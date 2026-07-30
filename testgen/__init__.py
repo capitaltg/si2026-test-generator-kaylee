@@ -29,6 +29,7 @@ from .presets import (
     list_presets,
     preset_form_values,
     scenario_roster_size,
+    scenario_grid_size,
 )
 from .writers import to_csv_string, to_sql_string, to_sqlite_bytes, write_sqlite
 
@@ -58,5 +59,6 @@ __all__ = [
     "generate_preset",
     "preset_form_values",
     "scenario_roster_size",
+    "scenario_grid_size",
     "__version__",
 ]
