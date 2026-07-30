@@ -59,8 +59,11 @@ jobs:
       - name: Check code formatting
         run: black --check .
 
+      # `python -m pytest`, not bare `pytest`: the module form puts the current
+      # directory on sys.path, and tests/test_api.py imports `server`, which
+      # lives at the repo root rather than inside the installed package.
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
 
   docker:
     name: Build image and smoke-test
