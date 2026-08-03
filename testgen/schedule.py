@@ -207,18 +207,27 @@ def rate_schedule_bytes(contract, form_title, section_label):
                 f"CLIN {c.get('clin') or ''}    Obligated {_money(c.get('funded'))}"
             )
             pdf.multi_cell(usable, 5, _latin1(line), new_x="LMARGIN", new_y="NEXT")
-        # Total presently allotted + the incremental-funding basis (FAR 52.232-22),
-        # the statement a real incrementally funded award carries.
+        # Total presently allotted. The FAR 52.232-22 Limitation of Funds
+        # sentence belongs only on an award that is genuinely incrementally
+        # funded: a fully funded award (a fixed-price one, typically) allots
+        # every exercised dollar up front and is under no such limitation, so
+        # printing the clause on it is a contradiction on the face of the form.
+        allotted_ceiling = sum(float(c.get("ceiling") or 0) for c in funded_clins)
+        statement = (
+            f"Total amount presently allotted to this contract: "
+            f"{_money(total_obligated)}."
+        )
+        if total_obligated + 0.5 < allotted_ceiling:
+            statement += (
+                " Incremental funding is subject to FAR 52.232-22, "
+                "Limitation of Funds."
+            )
         pdf.ln(1)
         pdf.set_font("Helvetica", "B", 8)
         pdf.multi_cell(
             usable,
             5,
-            _latin1(
-                f"Total amount presently allotted to this contract: "
-                f"{_money(total_obligated)}. Incremental funding is subject to "
-                f"FAR 52.232-22, Limitation of Funds."
-            ),
+            _latin1(statement),
             new_x="LMARGIN",
             new_y="NEXT",
         )

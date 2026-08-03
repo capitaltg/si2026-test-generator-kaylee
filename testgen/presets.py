@@ -252,7 +252,7 @@ def build_contract(rng, faker, index, opts=None):
     # 3). The mod history sums to it, and each action is attributed back to the
     # specific CLINs/ACRNs it obligates (the way an award + its SF-30 mods cite
     # accounting lines).
-    total_obligated = _allocate_funding(rng, periods, effective)
+    total_obligated = _allocate_funding(rng, periods, effective, contract_type)
     obligation_history = _build_obligations(
         rng, effective, total_obligated, periods, opts
     )
@@ -347,9 +347,19 @@ def _build_periods(rng, faker, effective, option_years, labor_type, opts):
         if pi == 0:
             exercised = True  # base year is always exercised
         else:
-            # Earlier options are more likely to be exercised; once one lapses,
-            # the rest cannot be exercised either.
-            still_exercised = still_exercised and (rng.random() < 0.7)
+            # An option is exercised by SF-30 at (or just before) the start of
+            # its own period, and its funds are obligated then — never months
+            # ahead of it (FAR 52.217-9; bona fide needs, 31 U.S.C. 1502). So an
+            # option whose period has not started cannot be exercised, however
+            # likely it otherwise was. Without this an award generated
+            # mid-base-year came out with next year's option already exercised
+            # and funded, which in turn made the base year read as a *closed*
+            # period and print a closed period's funding level.
+            # The roll is drawn either way so the date test doesn't shift the
+            # rest of the seeded stream.
+            roll = rng.random() < 0.7
+            started = start <= datetime.date.today()
+            still_exercised = still_exercised and started and roll
             exercised = still_exercised
 
         clins = _build_clins(rng, faker, pi, labor_type, opts)
@@ -525,19 +535,68 @@ def _loa(rng, effective):
     return f"{dept} {fy}{fy} {basic} {subhead} {obj} 25X {sac} 2D {aai}"
 
 
-def _allocate_funding(rng, periods, effective):
+def _funded_frac(rng, period, today, is_labor, full_funding, funds_ahead, opening):
+    """The fraction of one CLIN's ceiling that has been obligated as of today.
+
+    The distinction that drives everything: a *closed* period is funded to what
+    it actually cost, while the period *in flight* is funded to cover cost
+    incurred so far plus a buffer — so its fraction is a function of the clock,
+    not a coin flip. Reading the two the same way is what made a mid-flight base
+    year print a closed period's number.
+    """
+    if full_funding:
+        return 1.0
+    closed = period["pop_end"] < today
+    if not is_labor:
+        # Travel/ODC/materials are funded thin and topped up as trips and
+        # purchases are actually approved; by close-out the obligation sits
+        # wherever the real spend landed.
+        return rng.uniform(0.4, 0.9) if closed else rng.uniform(0.1, 0.5)
+    if closed:
+        # Funded to actual cost: at or a little under the ceiling, the remainder
+        # an underrun nobody ever obligated.
+        return rng.uniform(0.85, 1.0)
+    span = (period["pop_end"] - period["pop_start"]).days or 1
+    elapsed = min(1.0, max(0.0, (today - period["pop_start"]).days / span))
+    if funds_ahead:
+        # Cost incurred to date, plus roughly one to three months of runway.
+        return min(1.0, max(opening, elapsed + rng.uniform(0.08, 0.25)))
+    # Obligations trailing the clock: the contractor is burning into a funding
+    # gap and needs its next mod.
+    return max(0.1, elapsed - rng.uniform(0.05, 0.20))
+
+
+def _allocate_funding(rng, periods, effective, contract_type):
     """Obligate funding per CLIN the way an award (and its later mods) really
-    does: exercised periods only, labor CLINs funded first and heavily, travel/
-    ODC funded thin, the currently-active (last exercised) period left partially
-    funded so the incremental-funding case (FAR 52.232-22) is visible. Sets
-    `funded`, a printed `acrn`, and its `loa` (accounting classification citation)
-    on every CLIN (unexercised => funded 0, no ACRN); funded <= ceiling per CLIN.
-    Returns total_obligated (their sum)."""
-    exercised_idx = [i for i, p in enumerate(periods) if p["exercised"]]
-    last_ex = exercised_idx[-1] if exercised_idx else -1
+    does, and stamp the accounting citation each obligation is made against.
+
+    Who gets funded, and how much:
+      * An un-exercised period gets nothing — no dollars, no ACRN. Its funds are
+        obligated when the option is exercised, not months ahead of it.
+      * A fixed-price award is funded in full at award (FAR 32.702). Incremental
+        funding is a cost/T&M practice; applying it to FFP was simply wrong.
+      * Everything else is funded incrementally under FAR 52.232-22, against the
+        clock — see `_funded_frac`.
+
+    Funding does not always keep up. Roughly a third of awards are drawn with
+    obligations *behind* the clock (a late appropriation, a mod still sitting in
+    the contracting shop), which is the state the funding-pace tripwire exists to
+    catch. The posture is drawn once per award, so every CLIN on it tells the
+    same story rather than each line inventing its own.
+
+    Sets `funded`, a printed `acrn`, and its `loa` (accounting classification
+    citation) on every exercised CLIN (un-exercised => funded 0, no ACRN);
+    funded <= ceiling per CLIN, in whole dollars — a real accounting line does
+    not carry cents. Returns total_obligated (their sum)."""
+    today = datetime.date.today()
+    full_funding = contract_type == "FFP"
+    funds_ahead = rng.random() < 0.7
+    # The opening increment on an incrementally funded award: enough to cover the
+    # first few months, so a period that has barely started is not near-zero.
+    opening = rng.uniform(0.25, 0.40)
     total = 0.0
     acrn_i = 0
-    for i, p in enumerate(periods):
+    for p in periods:
         for c in p["clins"]:
             if not p["exercised"]:
                 c["funded"] = 0.0
@@ -545,16 +604,17 @@ def _allocate_funding(rng, periods, effective):
                 c["loa"] = None
                 continue
             ceiling = float(c.get("ceiling") or 0)
-            if c.get("is_labor"):
-                # The active period is only partially funded (money hasn't all
-                # landed yet); earlier periods are funded at or near their labor
-                # ceiling.
-                frac = (
-                    rng.uniform(0.55, 0.85) if i == last_ex else rng.uniform(0.85, 1.0)
-                )
-            else:
-                frac = rng.uniform(0.1, 0.5)  # travel / ODC: thinly funded
-            funded = _round_money(ceiling * frac)
+            frac = _funded_frac(
+                rng, p, today, c.get("is_labor"), full_funding, funds_ahead, opening
+            )
+            # A partial increment is obligated as a round figure — whole dollars,
+            # never cents. Fully funding a line is different: it obligates that
+            # line's price exactly, so it matches the ceiling to the cent.
+            funded = (
+                _round_money(ceiling)
+                if frac >= 1.0
+                else min(ceiling, float(round(ceiling * frac)))
+            )
             c["funded"] = funded
             c["acrn"] = _acrn(acrn_i)
             c["loa"] = _loa(rng, effective)
