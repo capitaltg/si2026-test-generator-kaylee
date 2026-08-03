@@ -199,7 +199,19 @@ def build_contract(rng, faker, index, opts=None):
 
     # Who and what.
     agency = _pick_agency(rng, opts.get("agency"))
-    effective = _effective_date(rng, opts)
+    # How many option years. Pinned by opt, else drawn — but WHERE it is drawn
+    # matters: an opt-OFF run must stay byte-for-byte what it always was, so the
+    # draw keeps its original position below. `pop_in_progress` needs the count
+    # early (today may fall inside an option year, which moves the award date
+    # back a year per preceding period), so that path alone draws it here.
+    _oy = opts.get("option_years")
+    option_years = int(_oy) if _oy not in (None, "") else None
+    if opts.get("pop_in_progress"):
+        if option_years is None:
+            option_years = rng.randint(1, 4)
+        effective = _effective_date(rng, opts, option_years)
+    else:
+        effective = _effective_date(rng, opts)
     piid = _piid(rng, faker, agency, effective)
     contractor = {
         "name": faker.company(),
@@ -236,9 +248,11 @@ def build_contract(rng, faker, index, opts=None):
         "disbursing_officer": faker.name(),
     }
 
-    # Periods: 1 base year + N option years, contiguous (invariant 6).
-    _oy = opts.get("option_years")
-    option_years = int(_oy) if _oy not in (None, "") else rng.randint(1, 4)
+    # Periods: 1 base year + N option years, contiguous (invariant 6). The draw
+    # sits here, in its original position in the seeded stream, unless
+    # pop_in_progress already needed it above.
+    if option_years is None:
+        option_years = rng.randint(1, 4)
     periods = _build_periods(rng, faker, effective, option_years, labor_type, opts)
 
     # Roll periods up into the total ceiling (invariant 2).
@@ -252,7 +266,7 @@ def build_contract(rng, faker, index, opts=None):
     # 3). The mod history sums to it, and each action is attributed back to the
     # specific CLINs/ACRNs it obligates (the way an award + its SF-30 mods cite
     # accounting lines).
-    total_obligated = _allocate_funding(rng, periods, effective, contract_type)
+    total_obligated = _allocate_funding(rng, periods, effective, contract_type, opts)
     obligation_history = _build_obligations(
         rng, effective, total_obligated, periods, opts
     )
@@ -320,16 +334,41 @@ def _pick_set_aside(rng, label):
     return rng.choices(_SET_ASIDES, weights=_SET_ASIDE_WEIGHTS)[0][0]
 
 
-def _effective_date(rng, opts=None):
+def _sub_years(d, n):
+    """n years before d, handling Feb 29 by falling back a day."""
+    for _ in range(n):
+        try:
+            d = d.replace(year=d.year - 1)
+        except ValueError:
+            d = d.replace(year=d.year - 1, day=d.day - 1)
+    return d
+
+
+def _effective_date(rng, opts=None, option_years=0):
     """A recent award date (deterministic from the seeded rng).
 
-    Default: a random date across 2024-2026. When the opt-in
-    "pop_in_progress" flag is set, anchor the base year to the present so today
-    lands ~5-10 months into the base period of performance — i.e. an award
-    that is currently mid-flight (used by burn/runway demos)."""
+    Default: a random date across 2024-2026. When the opt-in "pop_in_progress"
+    flag is set, anchor the award so that today lands ~5-10 months into one of
+    its periods — i.e. a contract that is currently mid-flight (used by burn/
+    runway demos).
+
+    Which period is in flight is itself a draw. A contract being monitored is
+    perfectly likely to be in its second option year, with the base year and
+    option 1 already performed and closed out; always putting today in the base
+    year meant no generated award ever had an exercised, funded option period,
+    and option years read as permanently $0. Weighted toward earlier periods,
+    since a contract only reaches option 3 by being exercised three times."""
     if opts and opts.get("pop_in_progress"):
-        weeks_into_base = rng.randint(20, 44)
-        return datetime.date.today() - datetime.timedelta(weeks=weeks_into_base)
+        active = rng.choices(
+            range(option_years + 1),
+            weights=[1 / (i + 1) for i in range(option_years + 1)],
+        )[0]
+        weeks_in = rng.randint(20, 44)
+        # Back up to the start of the active period, then one year per period
+        # that came before it, so today lands inside period `active`.
+        return _sub_years(
+            datetime.date.today() - datetime.timedelta(weeks=weeks_in), active
+        )
     start = datetime.date(2024, 1, 1)
     end = datetime.date(2026, 6, 30)
     return start + datetime.timedelta(days=rng.randint(0, (end - start).days))
@@ -359,7 +398,15 @@ def _build_periods(rng, faker, effective, option_years, labor_type, opts):
             # rest of the seeded stream.
             roll = rng.random() < 0.7
             started = start <= datetime.date.today()
-            still_exercised = still_exercised and started and roll
+            # A `pop_in_progress` award is explicitly a live contract anchored so
+            # today falls inside one of its periods (see _effective_date), so
+            # every period up to that one has been exercised by definition — a
+            # lapsed option in the middle would contradict the anchor and leave
+            # the "active" period unexercised and unfunded.
+            if opts and opts.get("pop_in_progress"):
+                still_exercised = started
+            else:
+                still_exercised = still_exercised and started and roll
             exercised = still_exercised
 
         clins = _build_clins(rng, faker, pi, labor_type, opts)
@@ -535,6 +582,77 @@ def _loa(rng, effective):
     return f"{dept} {fy}{fy} {basic} {subhead} {obj} 25X {sac} 2D {aai}"
 
 
+# How often an award of each contract type is funded in full at award.
+#
+# Full funding is the general rule (FAR 32.702): the money for the period is
+# obligated up front, so funded == ceiling and there is no Limitation of Funds
+# clause. Incremental funding is the specific authority — cost-type R&D under
+# FAR 32.703-1(b), severable services crossing a fiscal year under 32.703-3(b),
+# or a continuing resolution releasing money in tranches — and it is the case
+# a burn tool exists to watch. Both have to appear in generated data: a corpus
+# where every cost contract is incrementally funded is as unrealistic as one
+# where none is.
+#
+# Fixed-price is always fully funded. The cost-type odds lean incremental
+# because that is where the authority is routinely used. When per-type funding
+# specifications land (cost, the cost-plus variants, T&M), this table is what
+# they extend, and `_funds_in_full` is where a type-specific rule replaces a
+# coin flip.
+_FULL_FUNDING_ODDS = {"FFP": 1.0, "T&M": 0.5, "IDIQ": 0.5, "CPFF": 0.35}
+_DEFAULT_FULL_FUNDING_ODDS = 0.5
+
+
+def _funds_in_full(rng, contract_type, opts):
+    """Whether this award obligates its exercised periods in full.
+
+    Pinnable per scenario with the `funding` opt ("full" or "incremental"), so a
+    demo can ask for the case it needs instead of hunting for a seed."""
+    pinned = (opts or {}).get("funding")
+    roll = rng.random()  # drawn either way, so a pin doesn't shift the stream
+    if pinned == "full":
+        return True
+    if pinned == "incremental":
+        # FFP is fully funded as a matter of law and policy, not chance; asking
+        # for an incrementally funded fixed-price award is asking for a document
+        # that would not exist.
+        return contract_type == "FFP"
+    return roll < _FULL_FUNDING_ODDS.get(contract_type, _DEFAULT_FULL_FUNDING_ODDS)
+
+
+def _obligation_step(target):
+    """The round increment obligations are written in.
+
+    A contracting officer obligates $1,500,000, not $1,482,193. A CLIN's funded
+    figure is the sum of the tranches obligated against it so far, so it has to
+    land on a round number — otherwise it reads as what it was, a percentage of
+    the ceiling."""
+    for floor, step in (
+        (2_000_000, 100_000),
+        (500_000, 25_000),
+        (100_000, 10_000),
+        (20_000, 5_000),
+    ):
+        if target >= floor:
+            return step
+    return 1_000
+
+
+def _obligate(target, ceiling):
+    """Round a target obligation to whole tranches, capped at the line's ceiling.
+
+    Rounds *down*: the funded figure is money already obligated, so it lands on
+    the last tranche that has actually been written, not the next one. A line
+    always gets at least one tranche — an exercised CLIN with $0 obligated would
+    be a line nobody funded at all."""
+    if target >= ceiling:
+        return _round_money(ceiling)
+    step = _obligation_step(target)
+    funded = float(int(target // step) * step)
+    if funded <= 0:
+        funded = float(step)
+    return float(min(funded, int(ceiling)))
+
+
 def _funded_frac(rng, period, today, is_labor, full_funding, funds_ahead, opening):
     """The fraction of one CLIN's ceiling that has been obligated as of today.
 
@@ -566,17 +684,18 @@ def _funded_frac(rng, period, today, is_labor, full_funding, funds_ahead, openin
     return max(0.1, elapsed - rng.uniform(0.05, 0.20))
 
 
-def _allocate_funding(rng, periods, effective, contract_type):
+def _allocate_funding(rng, periods, effective, contract_type, opts=None):
     """Obligate funding per CLIN the way an award (and its later mods) really
     does, and stamp the accounting citation each obligation is made against.
 
     Who gets funded, and how much:
       * An un-exercised period gets nothing — no dollars, no ACRN. Its funds are
         obligated when the option is exercised, not months ahead of it.
-      * A fixed-price award is funded in full at award (FAR 32.702). Incremental
-        funding is a cost/T&M practice; applying it to FFP was simply wrong.
-      * Everything else is funded incrementally under FAR 52.232-22, against the
-        clock — see `_funded_frac`.
+      * A fully funded award obligates each exercised period's ceiling at award
+        (FAR 32.702) — always for fixed-price, often for cost/T&M. See
+        `_FULL_FUNDING_ODDS` and the `funding` opt.
+      * An incrementally funded award is funded under FAR 52.232-22 against the
+        clock — see `_funded_frac` — in round tranches, see `_obligate`.
 
     Funding does not always keep up. Roughly a third of awards are drawn with
     obligations *behind* the clock (a late appropriation, a mod still sitting in
@@ -589,7 +708,7 @@ def _allocate_funding(rng, periods, effective, contract_type):
     funded <= ceiling per CLIN, in whole dollars — a real accounting line does
     not carry cents. Returns total_obligated (their sum)."""
     today = datetime.date.today()
-    full_funding = contract_type == "FFP"
+    full_funding = _funds_in_full(rng, contract_type, opts)
     funds_ahead = rng.random() < 0.7
     # The opening increment on an incrementally funded award: enough to cover the
     # first few months, so a period that has barely started is not near-zero.
@@ -607,14 +726,7 @@ def _allocate_funding(rng, periods, effective, contract_type):
             frac = _funded_frac(
                 rng, p, today, c.get("is_labor"), full_funding, funds_ahead, opening
             )
-            # A partial increment is obligated as a round figure — whole dollars,
-            # never cents. Fully funding a line is different: it obligates that
-            # line's price exactly, so it matches the ceiling to the cent.
-            funded = (
-                _round_money(ceiling)
-                if frac >= 1.0
-                else min(ceiling, float(round(ceiling * frac)))
-            )
+            funded = _obligate(ceiling * frac, ceiling)
             c["funded"] = funded
             c["acrn"] = _acrn(acrn_i)
             c["loa"] = _loa(rng, effective)
@@ -1614,8 +1726,8 @@ def build_scenario(seed, opts=None):
     shared_k = 0
 
     roster = []
-    base = contract["periods"][0]["clins"] if contract["periods"] else []
-    for clin in base:
+    active = _active_period(contract)
+    for clin in (active or {}).get("clins", []):
         for line in clin.get("labor_rates", []):
             if staffing is not None:
                 fte = max(1, round((line.get("est_hours") or 2080) / 2080))
@@ -1646,12 +1758,31 @@ def build_scenario(seed, opts=None):
     # trailing ~25 weeks. Precomputed once so _timesheet_row can lay one row per
     # person per week without re-deriving (or re-randomising) the window per row.
     earliest = None
-    if (opts or {}).get("pop_in_progress"):
-        periods = contract.get("periods") or []
-        if periods:
-            earliest = periods[0]["pop_start"]
+    if (opts or {}).get("pop_in_progress") and active:
+        earliest = active["pop_start"]
     weeks = _week_list(earliest)
     return {"contract": contract, "roster": roster, "weeks": weeks}
+
+
+def _active_period(contract):
+    """The period the contract is currently performing in — the one containing
+    today, else the last exercised one, else the base year.
+
+    Everything downstream of the award (who is on the roster, which CLINs their
+    hours charge, which weeks the timesheet covers) has to hang off this period
+    rather than off the base year. `pop_in_progress` can anchor today inside an
+    option year, and a roster charging base-year CLINs while the contract is
+    performing option year 2 would tie timesheets to a period that closed a year
+    ago — hours landing outside the PoP that funds them."""
+    periods = contract.get("periods") or []
+    if not periods:
+        return None
+    today = datetime.date.today()
+    for p in periods:
+        if p["pop_start"] <= today <= p["pop_end"]:
+            return p
+    exercised = [p for p in periods if p.get("exercised")]
+    return exercised[-1] if exercised else periods[0]
 
 
 def _scenario_member(opts, index):
@@ -1665,14 +1796,14 @@ def _scenario_member(opts, index):
 
 
 def _scenario_base_pop_start(opts):
-    """The base period-of-performance start of the shared scenario's contract,
+    """The start of the period the shared scenario's contract is performing in,
     or None. Only used to bound timesheet weeks when pop_in_progress is on, so a
     week can never fall before the period it charges."""
     scenario = (opts or {}).get("_scenario")
     if not scenario:
         return None
-    periods = scenario["contract"].get("periods") or []
-    return periods[0]["pop_start"] if periods else None
+    active = _active_period(scenario["contract"])
+    return active["pop_start"] if active else None
 
 
 def _labor_export_row(rng, faker, index, opts=None):
@@ -1893,6 +2024,10 @@ _CONTRACT_OPTS = [
     "pop_in_progress",
     "agency",
     "contract_type",
+    # "full" or "incremental" — pins whether exercised periods are obligated up
+    # front or funded in tranches under FAR 52.232-22. Unset picks by contract
+    # type (see _FULL_FUNDING_ODDS).
+    "funding",
     "set_aside",
     "option_years",
     "lcat_lines",
