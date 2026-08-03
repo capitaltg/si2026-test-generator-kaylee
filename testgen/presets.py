@@ -244,17 +244,19 @@ def build_contract(rng, faker, index, opts=None):
     # Roll periods up into the total ceiling (invariant 2).
     total_ceiling = _round_money(sum(p["ceiling"] for p in periods))
 
-    # Obligation: only exercised periods can be funded, and usually not fully
-    # (incremental funding). total_obligated <= total_ceiling, strictly less
-    # here (invariant 3). Build a mod history that sums to it.
-    exercised_ceiling = _round_money(
-        sum(p["ceiling"] for p in periods if p["exercised"])
-    )
-    obligated_fraction = rng.uniform(0.55, 0.9)
-    total_obligated = _round_money(exercised_ceiling * obligated_fraction)
+    # Obligation: funding is obligated per CLIN (cited by ACRN), not as one pool
+    # for the whole award — a real contractor tracks billings against each CLIN's
+    # funded amount. Only exercised periods are funded, and usually not fully
+    # (incremental funding). _allocate_funding stamps `funded` + `acrn` on every
+    # CLIN; total_obligated is their sum, so it stays < total_ceiling (invariant
+    # 3). The mod history sums to it, and each action is attributed back to the
+    # specific CLINs/ACRNs it obligates (the way an award + its SF-30 mods cite
+    # accounting lines).
+    total_obligated = _allocate_funding(rng, periods, effective)
     obligation_history = _build_obligations(
         rng, effective, total_obligated, periods, opts
     )
+    _attribute_funding_to_actions(obligation_history, periods)
 
     return {
         "piid": piid,
@@ -493,6 +495,109 @@ _MOD_TYPE_ACTIONS = {
 }
 
 
+# ACRN letters, per DFARS 204.7107: a two-position alpha/numeric code that
+# never uses the letters I or O (too easily confused with 1 and 0).
+_ACRN_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+
+def _acrn(i):
+    """A two-position Accounting Classification Reference Number (AA, AB, ... BA),
+    the detached prefix a real award/mod uses to cite which line of accounting
+    funds a CLIN. Sequential (skipping I and O) so a contract's ACRNs are
+    distinct and stable."""
+    n = len(_ACRN_LETTERS)
+    return _ACRN_LETTERS[(i // n) % n] + _ACRN_LETTERS[i % n]
+
+
+def _loa(rng, effective):
+    """A plausible DoD line of accounting (the accounting classification citation
+    an ACRN prefixes in the appropriation-data block): department, two-digit
+    fiscal year, basic appropriation symbol, sub-head, object class, and a
+    supplemental accounting classification / AAI. Field-shaped like a real LOA;
+    the values are synthetic."""
+    dept = rng.choice(["21", "17", "57", "97"])  # Army / Navy / Air Force / DoD
+    fy = f"{effective.year % 100:02d}"
+    basic = rng.choice(["2020", "2035", "3600", "0400", "4930"])
+    subhead = _alnum(rng, 4)
+    obj = rng.choice(["252", "255", "310"])
+    sac = f"{rng.randint(0, 999999):06d}"
+    aai = _alnum(rng, 6)
+    return f"{dept} {fy}{fy} {basic} {subhead} {obj} 25X {sac} 2D {aai}"
+
+
+def _allocate_funding(rng, periods, effective):
+    """Obligate funding per CLIN the way an award (and its later mods) really
+    does: exercised periods only, labor CLINs funded first and heavily, travel/
+    ODC funded thin, the currently-active (last exercised) period left partially
+    funded so the incremental-funding case (FAR 52.232-22) is visible. Sets
+    `funded`, a printed `acrn`, and its `loa` (accounting classification citation)
+    on every CLIN (unexercised => funded 0, no ACRN); funded <= ceiling per CLIN.
+    Returns total_obligated (their sum)."""
+    exercised_idx = [i for i, p in enumerate(periods) if p["exercised"]]
+    last_ex = exercised_idx[-1] if exercised_idx else -1
+    total = 0.0
+    acrn_i = 0
+    for i, p in enumerate(periods):
+        for c in p["clins"]:
+            if not p["exercised"]:
+                c["funded"] = 0.0
+                c["acrn"] = None
+                c["loa"] = None
+                continue
+            ceiling = float(c.get("ceiling") or 0)
+            if c.get("is_labor"):
+                # The active period is only partially funded (money hasn't all
+                # landed yet); earlier periods are funded at or near their labor
+                # ceiling.
+                frac = (
+                    rng.uniform(0.55, 0.85) if i == last_ex else rng.uniform(0.85, 1.0)
+                )
+            else:
+                frac = rng.uniform(0.1, 0.5)  # travel / ODC: thinly funded
+            funded = _round_money(ceiling * frac)
+            c["funded"] = funded
+            c["acrn"] = _acrn(acrn_i)
+            c["loa"] = _loa(rng, effective)
+            acrn_i += 1
+            total += funded
+    return _round_money(total)
+
+
+def _attribute_funding_to_actions(history, periods):
+    """Attribute each obligation action's dollars to specific CLINs/ACRNs, the
+    way an award and its SF-30 mods cite accounting lines. Funds CLINs in the
+    order money really lands: base period first (labor before cost), then option
+    periods as they're exercised. Adds `funding_lines` [{clin, acrn, amount}] to
+    each action; because the increments sum to the same total the per-CLIN
+    `funded` amounts do, every CLIN's capacity is consumed exactly."""
+    queue = []  # [clin, acrn, loa, remaining] in the order funding lands
+    for p in periods:
+        if not p["exercised"]:
+            continue
+        for c in sorted(p["clins"], key=lambda x: not x.get("is_labor")):
+            rem = float(c.get("funded") or 0)
+            if rem > 0:
+                queue.append([c["clin"], c.get("acrn"), c.get("loa"), rem])
+    qi = 0
+    for action in history:
+        amt = float(action["amount"])
+        lines = {}  # clin -> {clin, acrn, loa, amount}; one line per CLIN per action
+        while amt > 0.005 and qi < len(queue):
+            clin, acrn, loa, rem = queue[qi]
+            take = min(amt, rem)
+            if clin in lines:
+                lines[clin]["amount"] += take
+            else:
+                lines[clin] = {"clin": clin, "acrn": acrn, "loa": loa, "amount": take}
+            amt -= take
+            queue[qi][3] = rem - take
+            if queue[qi][3] <= 0.005:
+                qi += 1
+        for line in lines.values():
+            line["amount"] = _round_money(line["amount"])
+        action["funding_lines"] = list(lines.values())
+
+
 def _build_obligations(rng, effective, total_obligated, periods, opts=None):
     """A mod history (award + P00001, P00002 ...) whose amounts sum EXACTLY to
     total_obligated, with a running cumulative. Mods are dated within the
@@ -612,6 +717,34 @@ def _setaside_boxes(set_aside):
     return {_P + "UNRESTRICTIONTED[0]": "/1"}
 
 
+def _line_item_pricing(clin):
+    """Quantity / unit / unit price / amount for one CLIN on an award face
+    (SF-1449 blocks 21-24; SF-26 block 15), where amount = quantity x unit price.
+
+    A T&M/labor CLIN has NO single billing rate — FAR 16.601 requires a separate
+    fixed hourly rate for each labor category. So:
+      - a CLIN with a SINGLE labor category bills by the hour at that one real
+        rate (quantity = hours, unit "HR", unit price = the rate, amount =
+        hours x rate); unit price and amount legitimately differ.
+      - a CLIN spanning MULTIPLE labor categories has no one rate to show on the
+        face, so it is priced as a single not-to-exceed lot (quantity 1, unit
+        "LO", unit price = amount = the CLIN ceiling). The per-category rates and
+        hours are itemized on the Section B labor-rate schedule, the way a real
+        award carries them.
+    A cost-reimbursable line (travel / ODC) is a lot too."""
+    ceiling = float(clin.get("ceiling") or 0)
+    lines = clin.get("labor_rates") or []
+    if (
+        clin.get("is_labor")
+        and len(lines) == 1
+        and int(lines[0].get("est_hours") or 0) > 0
+    ):
+        hours = int(lines[0]["est_hours"])
+        rate = float(lines[0].get("loaded_rate") or 0)
+        return f"{hours:,}", "HR", f"${rate:,.2f}", _fmt_money(ceiling)
+    return "1", "LO", _fmt_money(ceiling), _fmt_money(ceiling)
+
+
 def contract_to_sf1449(contract):
     """Map a contract onto the real SF-1449 (commercial award). The base-year
     CLINs go into the line-item grid (rows 1-8); header blocks carry the PIID,
@@ -710,12 +843,13 @@ def contract_to_sf1449(contract):
     # Base-year CLINs into the numbered line-item grid.
     base = c["periods"][0]["clins"] if c["periods"] else []
     for i, clin in enumerate(base[:8], start=1):
+        qty, unit, unit_price, amount = _line_item_pricing(clin)
         values[_P + f"ITEMNUM{i}[0]"] = clin["clin"]
         values[_P + f"schedule{i}[0]"] = f"{clin['title']} ({clin['type']})"
-        values[_P + f"quantity{i}[0]"] = "1"
-        values[_P + f"unit{i}[0]"] = "LO"
-        values[_P + f"unitprice{i}[0]"] = _fmt_money(clin["ceiling"])
-        values[_P + f"amount{i}[0]"] = _fmt_money(clin["ceiling"])
+        values[_P + f"quantity{i}[0]"] = qty
+        values[_P + f"unit{i}[0]"] = unit
+        values[_P + f"unitprice{i}[0]"] = unit_price
+        values[_P + f"amount{i}[0]"] = amount
     return values
 
 
@@ -781,12 +915,13 @@ def contract_to_sf26(contract):
 
     # Block 15 line-item grid: the SF-26 face fits 5 base-year CLIN summary rows.
     for i, clin in enumerate(base[:5], start=1):
+        qty, unit, unit_price, amount = _line_item_pricing(clin)
         values[_P + f"ITEMNO{i}[0]"] = clin["clin"]
         values[_P + f"SUPPLIESSERVICES{i}[0]"] = f"{clin['title']} ({clin['type']})"
-        values[_P + f"C15{i}[0]"] = "1"
-        values[_P + f"D15{i}[0]"] = "LO"
-        values[_P + f"E15{i}[0]"] = _fmt_money(clin["ceiling"])
-        values[_P + f"F15{i}[0]"] = _fmt_money(clin["ceiling"])
+        values[_P + f"C15{i}[0]"] = qty
+        values[_P + f"D15{i}[0]"] = unit
+        values[_P + f"E15{i}[0]"] = unit_price
+        values[_P + f"F15{i}[0]"] = amount
     return values
 
 
@@ -806,9 +941,26 @@ def contract_to_sf30(contract, mod=None):
     prev_cumulative = _round_money(mod["cumulative_obligated"] - mod["amount"])
     mod_date = _fmt_date(mod["date"])
 
+    # A mod obligates money against specific CLINs, each cited by its ACRN — the
+    # per-CLIN funding a contractor tracks billings against. Render those lines
+    # in the accounting-data block (25) and again inside the description (14).
+    funding_lines = mod.get("funding_lines") or []
+    acct_detail = "; ".join(
+        f"ACRN {ln.get('acrn') or '--'}: {ln.get('loa') or ''} "
+        f"(CLIN {ln['clin']}) {_fmt_money(ln['amount'])}"
+        for ln in funding_lines
+    )
+    by_clin = ", ".join(
+        f"CLIN {ln['clin']} (ACRN {ln.get('acrn') or '--'}) {_fmt_money(ln['amount'])}"
+        for ln in funding_lines
+    )
+    clin_clause = (
+        f" (d) Funds are obligated by CLIN as follows: {by_clin}." if by_clin else ""
+    )
     accounting = (
-        f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-        f"Obligated this action {_fmt_money(mod['amount'])}."
+        f"Appropriation FY{c['effective_date'].year % 100:02d}. "
+        f"Obligated this action {_fmt_money(mod['amount'])}"
+        + (f". {acct_detail}." if acct_detail else ".")
     )
 
     # Block 1 "Contract ID Code" is a single award-instrument letter, not the
@@ -869,7 +1021,7 @@ def contract_to_sf30(contract, mod=None):
             f"exercises the option, obligating {_fmt_money(mod['amount'])} "
             f"(cumulative obligated {_fmt_money(mod['cumulative_obligated'])}). "
             f"(b) The total contract ceiling remains {_fmt_money(c['total_ceiling'])}. "
-            "(c) All other terms and conditions remain unchanged."
+            "(c) All other terms and conditions remain unchanged." + clin_clause
         )
     else:
         values[_P + "CheckBox13A[0]"] = "/1"
@@ -882,6 +1034,7 @@ def contract_to_sf30(contract, mod=None):
             f"{_fmt_money(mod['cumulative_obligated'])}. (b) The total contract "
             f"ceiling remains {_fmt_money(c['total_ceiling'])}. (c) All other terms "
             "and conditions remain unchanged and in full force and effect."
+            + clin_clause
         )
     return values
 

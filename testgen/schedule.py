@@ -129,6 +129,11 @@ def rate_schedule_bytes(contract, form_title, section_label):
                 f"CLIN {clin.get('clin', '')} - {clin.get('title', '')} "
                 f"({clin.get('type', '')}) - Ceiling {_money(clin.get('ceiling'))}"
             )
+            funded = clin.get("funded")
+            if funded is not None:
+                acrn = clin.get("acrn")
+                head += f" - Funded {_money(funded)}"
+                head += f" (ACRN {acrn})" if acrn else ""
             pdf.multi_cell(usable, 5, _latin1(head), new_x="LMARGIN", new_y="NEXT")
 
             lines = clin.get("labor_rates") or []
@@ -167,6 +172,57 @@ def rate_schedule_bytes(contract, form_title, section_label):
             pdf.cell(rest, 6, "", border=1)
             pdf.ln(8)
             pdf.set_font("Helvetica", "", 8)
+
+    # Accounting and Appropriation Data: which ACRN funds which CLIN and the
+    # dollars obligated against it. This is the award's funding citation — the
+    # per-CLIN obligated amounts a contractor bills against, which SF-30 mods
+    # later amend. Only funded (exercised, obligated) CLINs appear.
+    funded_clins = [
+        c
+        for p in contract.get("periods", [])
+        for c in p.get("clins", [])
+        if (c.get("funded") or 0) > 0
+    ]
+    if funded_clins:
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(20, 60, 120)
+        pdf.cell(
+            0,
+            7,
+            _latin1("ACCOUNTING AND APPROPRIATION DATA"),
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        pdf.set_text_color(0, 0, 0)
+        # Each ACRN is a detached prefix to its accounting classification citation
+        # (line of accounting), with the CLIN it funds and the obligated amount
+        # (DFARS 204.7107). One funded CLIN per line, the way an award prints it.
+        pdf.set_font("Helvetica", "", 8)
+        total_obligated = 0.0
+        for c in funded_clins:
+            total_obligated += float(c.get("funded") or 0)
+            line = (
+                f"ACRN {c.get('acrn') or '--'}: {c.get('loa') or ''}    "
+                f"CLIN {c.get('clin') or ''}    Obligated {_money(c.get('funded'))}"
+            )
+            pdf.multi_cell(usable, 5, _latin1(line), new_x="LMARGIN", new_y="NEXT")
+        # Total presently allotted + the incremental-funding basis (FAR 52.232-22),
+        # the statement a real incrementally funded award carries.
+        pdf.ln(1)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.multi_cell(
+            usable,
+            5,
+            _latin1(
+                f"Total amount presently allotted to this contract: "
+                f"{_money(total_obligated)}. Incremental funding is subject to "
+                f"FAR 52.232-22, Limitation of Funds."
+            ),
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        pdf.set_font("Helvetica", "", 8)
 
     return bytes(pdf.output())
 
