@@ -274,11 +274,7 @@ def build_contract(rng, faker, index, opts=None):
     # later mods made. See _funding_actions / _stamp_award_funding.
     full_funding = _funds_in_full(rng, contract_type, opts)
     total_obligated = _allocate_funding(rng, periods, effective, full_funding)
-    _n_mods = opts.get("n_mods")
-    extra_mods = int(_n_mods) if _n_mods not in (None, "") else 0
-    obligation_history = _funding_actions(
-        rng, periods, effective, full_funding, extra_mods, opts
-    )
+    obligation_history = _funding_actions(rng, periods, effective, full_funding, opts)
     _stamp_award_funding(periods, obligation_history)
 
     return {
@@ -366,12 +362,23 @@ def _effective_date(rng, opts=None, option_years=0):
     option 1 already performed and closed out; always putting today in the base
     year meant no generated award ever had an exercised, funded option period,
     and option years read as permanently $0. Weighted toward earlier periods,
-    since a contract only reaches option 3 by being exercised three times."""
+    since a contract only reaches option 3 by being exercised three times.
+
+    Pinnable with the `active_period` opt (0 = base year, 1 = option year 1 …).
+    This matters more than it looks: an award form can only show what it itself
+    obligated, so on a contract performing option year 2 the award document says
+    nothing about the funding of the period in flight — that money came from
+    later mods. A demo where one uploaded award has to tell the whole story
+    should pin `active_period: 0`."""
     if opts and opts.get("pop_in_progress"):
-        active = rng.choices(
-            range(option_years + 1),
-            weights=[1 / (i + 1) for i in range(option_years + 1)],
-        )[0]
+        _pin = opts.get("active_period")
+        if _pin not in (None, ""):
+            active = max(0, min(int(_pin), option_years))
+        else:
+            active = rng.choices(
+                range(option_years + 1),
+                weights=[1 / (i + 1) for i in range(option_years + 1)],
+            )[0]
         weeks_in = rng.randint(20, 44)
         # Back up to the start of the active period, then one year per period
         # that came before it, so today lands inside period `active`.
@@ -745,7 +752,7 @@ def _allocate_funding(rng, periods, effective, full_funding):
     return _round_money(total)
 
 
-def _funding_actions(rng, periods, effective, full_funding, extra_mods, opts):
+def _funding_actions(rng, periods, effective, full_funding, opts):
     """The award's funding timeline, derived from what each CLIN is funded to.
 
     This is built per period rather than as a random split of one total, because
@@ -759,11 +766,35 @@ def _funding_actions(rng, periods, effective, full_funding, extra_mods, opts):
     mods cite accounting lines. Because a period's actions consume exactly that
     period's CLIN capacity, the actions reconcile to the per-CLIN `funded`
     amounts, and the running cumulative reconciles to total_obligated.
+
+    `n_mods` pins the exact number of money-moving mods after the Award. One of
+    those is spoken for by each exercised option period — an option cannot be
+    exercised without a mod — so that many are always emitted, and `n_mods` sets
+    how many *additional* incremental-funding mods there are on top. Pinning it
+    overrides the single-action rule for a fully funded award: an explicit
+    request for N mods is a request for N mods.
     """
     today = datetime.date.today()
     mod_types = opts.get("mod_types") or None
     if isinstance(mod_types, str):
         mod_types = [mod_types]  # a single UI pick applies to every mod
+
+    funded_periods = [
+        i
+        for i, p in enumerate(periods)
+        if any(float(c.get("funded") or 0) > 0 for c in p["clins"])
+    ]
+    # Extra incremental mods to spread across those periods, evenly with the
+    # remainder going to the earliest (they have had the most time to accumulate).
+    _n = opts.get("n_mods")
+    extra_total = None
+    if _n not in (None, ""):
+        extra_total = max(0, int(_n) - max(0, len(funded_periods) - 1))
+    extra_for = {}
+    if extra_total is not None and funded_periods:
+        base, rem = divmod(extra_total, len(funded_periods))
+        for j, i in enumerate(funded_periods):
+            extra_for[i] = base + (1 if j < rem else 0)
 
     actions = []
     for i, p in enumerate(periods):
@@ -789,11 +820,14 @@ def _funding_actions(rng, periods, effective, full_funding, extra_mods, opts):
         # How many actions funded this period. Fully funded means exactly one:
         # the whole period is obligated in a single stroke. Otherwise money came
         # in tranches — more of them for a period that has run its course than
-        # for one still early in flight.
-        if full_funding:
+        # for one still early in flight. A pinned `n_mods` replaces both rules
+        # with the caller's exact count.
+        if i in extra_for:
+            n = 1 + extra_for[i]
+        elif full_funding:
             n = 1
         else:
-            n = 1 + (rng.randint(1, 3) if closed else rng.randint(0, 2)) + extra_mods
+            n = 1 + (rng.randint(1, 3) if closed else rng.randint(0, 2))
 
         # Split the period's funded total into that many round tranches, the last
         # absorbing the remainder so the sum is exact.
@@ -2118,6 +2152,10 @@ PRESETS = {
 # mapped to []) shows no options panel at all.
 _CONTRACT_OPTS = [
     "pop_in_progress",
+    # Which period today falls inside when pop_in_progress is on: 0 = base year,
+    # 1 = option year 1, and so on. Unset draws one (weighted toward earlier
+    # periods). Pin to 0 when a single award document has to tell the whole story.
+    "active_period",
     "agency",
     "contract_type",
     # "full" or "incremental" — pins whether exercised periods are obligated up

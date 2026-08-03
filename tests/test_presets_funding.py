@@ -160,6 +160,45 @@ def test_the_timeline_reconciles_to_the_per_clin_funding():
             assert round(per_clin.get(cl["clin"], 0.0), 2) == round(cl["funded"], 2)
 
 
+def test_active_period_is_pinnable():
+    # Pinning matters because an award form can only show what it obligated: on a
+    # contract performing option year 2 the award says nothing about the period
+    # in flight. `active_period: 0` is how a demo gets an award that does.
+    today = datetime.date.today()
+    for pin in (0, 1, 2):
+        for seed in (3, 11, 42):
+            c = _award(seed, pop_in_progress=True, option_years=2, active_period=pin)
+            active = [
+                p for p in c["periods"] if p["pop_start"] <= today <= p["pop_end"]
+            ]
+            assert len(active) == 1
+            assert c["periods"].index(active[0]) == pin
+    # Out of range clamps rather than raising.
+    c = _award(3, pop_in_progress=True, option_years=1, active_period=9)
+    assert any(p["pop_start"] <= today <= p["pop_end"] for p in c["periods"])
+
+
+def test_n_mods_is_the_exact_number_of_mods():
+    # An exercised option always costs one mod (it cannot be exercised without
+    # one), so the pin sets how many *incremental* mods sit on top.
+    for option_years in (0, 2):
+        for n in (0, 1, 3):
+            c = _award(
+                7,
+                pop_in_progress=True,
+                option_years=option_years,
+                n_mods=n,
+                funding="incremental",
+            )
+            mods = [m for m in c["obligation_history"] if m["mod"] != "Award"]
+            exercised_options = sum(
+                1 for p in c["periods"][1:] if any(cl["funded"] for cl in p["clins"])
+            )
+            assert len(mods) == max(
+                n, exercised_options
+            ), f"option_years={option_years} n_mods={n} -> {len(mods)} mods"
+
+
 def test_today_can_land_in_an_option_year():
     # A monitored contract is often in its second or third year, with the base
     # year performed and closed. When every award anchored today to the base
