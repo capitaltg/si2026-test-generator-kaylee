@@ -77,6 +77,89 @@ def test_a_mid_flight_period_is_not_funded_like_a_closed_one():
     assert checked, "no mid-flight labor CLIN was generated to check"
 
 
+def test_a_closed_period_is_fully_obligated():
+    # A period that has been performed had to be funded to perform it. Anything
+    # short of its ceiling would mean the contractor worked a year it was never
+    # paid for.
+    today = datetime.date.today()
+    checked = 0
+    for seed in range(40):
+        c = _award(seed, pop_in_progress=True, option_years=3, funding="incremental")
+        for p in c["periods"]:
+            if p["pop_end"] >= today:
+                continue
+            for cl in p["clins"]:
+                assert cl["funded"] == cl["ceiling"], (
+                    f"seed {seed}: closed {cl['clin']} funded {cl['funded']} "
+                    f"of {cl['ceiling']}"
+                )
+                checked += 1
+    assert checked, "no closed period was generated to check"
+
+
+def test_the_award_shows_only_what_it_obligated():
+    # An award form is signed once, so it can only cite the money that signature
+    # obligated. `funded_at_award` is that figure; `funded` is the cumulative as
+    # of today, which includes obligations later mods made and which the award
+    # cannot possibly show.
+    for seed in range(30):
+        c = _award(seed, pop_in_progress=True, option_years=2)
+        award = c["obligation_history"][0]
+        assert award["mod"] == "Award"
+        at_award = sum(cl["funded_at_award"] for _p, cl in _clins(c))
+        assert round(at_award, 2) == round(award["cumulative_obligated"], 2)
+        for _p, cl in _clins(c):
+            assert cl["funded_at_award"] <= cl["funded"] + 0.005
+        # Only the base period can carry award-time funding: an option is
+        # obligated by the mod that exercises it, not by the award.
+        for p in c["periods"][1:]:
+            assert all(cl["funded_at_award"] == 0 for cl in p["clins"])
+
+
+def test_an_option_is_obligated_by_a_mod_dated_at_its_start():
+    # The SF-30 exercising an option is signed within the notice window before
+    # that period begins (FAR 52.217-9) — not months early, and not after the
+    # period is under way.
+    today = datetime.date.today()
+    checked = 0
+    for seed in range(40):
+        c = _award(seed, pop_in_progress=True, option_years=3)
+        by_name = {p["name"]: p for p in c["periods"]}
+        for m in c["obligation_history"]:
+            if not m["action"].startswith("Exercise option period ("):
+                continue
+            name = m["action"].split("(", 1)[1].rstrip(")")
+            p = by_name[name]
+            assert m["date"] <= min(p["pop_start"], today)
+            assert m["date"] >= p["pop_start"] - datetime.timedelta(days=45)
+            # And it funds that period's CLINs, nobody else's.
+            assert {l["clin"] for l in m["funding_lines"]} <= {
+                cl["clin"] for cl in p["clins"]
+            }
+            checked += 1
+    assert checked, "no option-exercise mod was generated to check"
+
+
+def test_the_timeline_reconciles_to_the_per_clin_funding():
+    for seed in range(30):
+        c = _award(seed, pop_in_progress=True, option_years=2)
+        history = c["obligation_history"]
+        assert round(history[-1]["cumulative_obligated"], 2) == round(
+            c["total_obligated"], 2
+        )
+        # Every action's lines sum to that action's amount, and each CLIN's lines
+        # across the whole timeline sum to what it is funded to.
+        per_clin = {}
+        for m in history:
+            assert round(sum(l["amount"] for l in m["funding_lines"]), 2) == round(
+                m["amount"], 2
+            )
+            for l in m["funding_lines"]:
+                per_clin[l["clin"]] = per_clin.get(l["clin"], 0.0) + l["amount"]
+        for _p, cl in _clins(c):
+            assert round(per_clin.get(cl["clin"], 0.0), 2) == round(cl["funded"], 2)
+
+
 def test_today_can_land_in_an_option_year():
     # A monitored contract is often in its second or third year, with the base
     # year performed and closed. When every award anchored today to the base

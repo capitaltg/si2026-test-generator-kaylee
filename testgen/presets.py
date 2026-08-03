@@ -266,11 +266,20 @@ def build_contract(rng, faker, index, opts=None):
     # 3). The mod history sums to it, and each action is attributed back to the
     # specific CLINs/ACRNs it obligates (the way an award + its SF-30 mods cite
     # accounting lines).
-    total_obligated = _allocate_funding(rng, periods, effective, contract_type, opts)
-    obligation_history = _build_obligations(
-        rng, effective, total_obligated, periods, opts
+    #
+    # Two figures come out of this, and they are not interchangeable. `funded` is
+    # the cumulative obligation as of today — the right number for a funding
+    # summary or a burn tool. `funded_at_award` is what the award form itself can
+    # show, because an award is signed once and cannot cite obligations that
+    # later mods made. See _funding_actions / _stamp_award_funding.
+    full_funding = _funds_in_full(rng, contract_type, opts)
+    total_obligated = _allocate_funding(rng, periods, effective, full_funding)
+    _n_mods = opts.get("n_mods")
+    extra_mods = int(_n_mods) if _n_mods not in (None, "") else 0
+    obligation_history = _funding_actions(
+        rng, periods, effective, full_funding, extra_mods, opts
     )
-    _attribute_funding_to_actions(obligation_history, periods)
+    _stamp_award_funding(periods, obligation_history)
 
     return {
         "piid": piid,
@@ -665,15 +674,17 @@ def _funded_frac(rng, period, today, is_labor, full_funding, funds_ahead, openin
     if full_funding:
         return 1.0
     closed = period["pop_end"] < today
-    if not is_labor:
-        # Travel/ODC/materials are funded thin and topped up as trips and
-        # purchases are actually approved; by close-out the obligation sits
-        # wherever the real spend landed.
-        return rng.uniform(0.4, 0.9) if closed else rng.uniform(0.1, 0.5)
+    if not is_labor and not closed:
+        # Travel/ODC/materials in the period being performed are funded thin and
+        # topped up as trips and purchases are actually approved.
+        return rng.uniform(0.1, 0.5)
     if closed:
-        # Funded to actual cost: at or a little under the ceiling, the remainder
-        # an underrun nobody ever obligated.
-        return rng.uniform(0.85, 1.0)
+        # A period that has been performed is fully obligated. The money had to
+        # be on the contract for the work to be done — a contractor does not
+        # perform a year it was never funded for. (An underrun is deobligated at
+        # closeout, which is a closeout artifact rather than the normal state of
+        # a completed period, so it is not modelled here.)
+        return 1.0
     span = (period["pop_end"] - period["pop_start"]).days or 1
     elapsed = min(1.0, max(0.0, (today - period["pop_start"]).days / span))
     if funds_ahead:
@@ -684,7 +695,7 @@ def _funded_frac(rng, period, today, is_labor, full_funding, funds_ahead, openin
     return max(0.1, elapsed - rng.uniform(0.05, 0.20))
 
 
-def _allocate_funding(rng, periods, effective, contract_type, opts=None):
+def _allocate_funding(rng, periods, effective, full_funding):
     """Obligate funding per CLIN the way an award (and its later mods) really
     does, and stamp the accounting citation each obligation is made against.
 
@@ -708,7 +719,6 @@ def _allocate_funding(rng, periods, effective, contract_type, opts=None):
     funded <= ceiling per CLIN, in whole dollars — a real accounting line does
     not carry cents. Returns total_obligated (their sum)."""
     today = datetime.date.today()
-    full_funding = _funds_in_full(rng, contract_type, opts)
     funds_ahead = rng.random() < 0.7
     # The opening increment on an incrementally funded award: enough to cover the
     # first few months, so a period that has barely started is not near-zero.
@@ -735,109 +745,164 @@ def _allocate_funding(rng, periods, effective, contract_type, opts=None):
     return _round_money(total)
 
 
-def _attribute_funding_to_actions(history, periods):
-    """Attribute each obligation action's dollars to specific CLINs/ACRNs, the
-    way an award and its SF-30 mods cite accounting lines. Funds CLINs in the
-    order money really lands: base period first (labor before cost), then option
-    periods as they're exercised. Adds `funding_lines` [{clin, acrn, amount}] to
-    each action; because the increments sum to the same total the per-CLIN
-    `funded` amounts do, every CLIN's capacity is consumed exactly."""
-    queue = []  # [clin, acrn, loa, remaining] in the order funding lands
-    for p in periods:
-        if not p["exercised"]:
-            continue
-        for c in sorted(p["clins"], key=lambda x: not x.get("is_labor")):
-            rem = float(c.get("funded") or 0)
-            if rem > 0:
-                queue.append([c["clin"], c.get("acrn"), c.get("loa"), rem])
-    qi = 0
-    for action in history:
-        amt = float(action["amount"])
-        lines = {}  # clin -> {clin, acrn, loa, amount}; one line per CLIN per action
-        while amt > 0.005 and qi < len(queue):
-            clin, acrn, loa, rem = queue[qi]
-            take = min(amt, rem)
-            if clin in lines:
-                lines[clin]["amount"] += take
-            else:
-                lines[clin] = {"clin": clin, "acrn": acrn, "loa": loa, "amount": take}
-            amt -= take
-            queue[qi][3] = rem - take
-            if queue[qi][3] <= 0.005:
-                qi += 1
-        for line in lines.values():
-            line["amount"] = _round_money(line["amount"])
-        action["funding_lines"] = list(lines.values())
+def _funding_actions(rng, periods, effective, full_funding, extra_mods, opts):
+    """The award's funding timeline, derived from what each CLIN is funded to.
 
+    This is built per period rather than as a random split of one total, because
+    the timeline is what explains the funding: the base period is obligated by
+    the award itself, and every option period is obligated by the SF-30 that
+    exercised it, signed at (or just before) the start of that period. Money
+    inside a period arrives as further incremental-funding mods dated within it.
 
-def _build_obligations(rng, effective, total_obligated, periods, opts=None):
-    """A mod history (award + P00001, P00002 ...) whose amounts sum EXACTLY to
-    total_obligated, with a running cumulative. Mods are dated within the
-    exercised periods and after the award.
-
-    Opt-in knobs (both optional; unset => the usual random behavior):
-      n_mods    exact number of money-moving mods after the Award (>=0).
-      mod_types list of type keys assigned to those mods in order, cycling if
-                shorter than n_mods. Keys: 'incremental_funding',
-                'option_exercise' (or a literal action string)."""
-    opts = opts or {}
-    exercised = [p for p in periods if p["exercised"]]
+    Each action carries `funding_lines` — the specific CLINs and ACRNs its
+    dollars were obligated against, labor before cost, the way an award and its
+    mods cite accounting lines. Because a period's actions consume exactly that
+    period's CLIN capacity, the actions reconcile to the per-CLIN `funded`
+    amounts, and the running cumulative reconciles to total_obligated.
+    """
+    today = datetime.date.today()
     mod_types = opts.get("mod_types") or None
     if isinstance(mod_types, str):
         mod_types = [mod_types]  # a single UI pick applies to every mod
-    n_mods = opts.get("n_mods")
-    if n_mods is not None:
-        # +1 for the Award entry itself; every extra entry is one mod.
-        n_actions = max(1, int(n_mods) + 1)
-    else:
-        # One funding action per exercised period, plus 0-2 incremental mods.
-        n_actions = max(1, len(exercised) + rng.randint(0, 2))
 
-    # Split total_obligated into n_actions positive increments. Random weights,
-    # last increment absorbs the rounding so the sum is exact.
-    weights = [rng.uniform(0.5, 1.5) for _ in range(n_actions)]
-    wsum = sum(weights)
-    increments = [_round_to(total_obligated * w / wsum, 1000) for w in weights[:-1]]
-    increments.append(_round_money(total_obligated - sum(increments)))
+    actions = []
+    for i, p in enumerate(periods):
+        clins = [c for c in p["clins"] if float(c.get("funded") or 0) > 0]
+        if not clins:
+            continue  # an un-exercised option: nothing has been obligated
+        funded_total = sum(float(c["funded"]) for c in clins)
+        closed = p["pop_end"] < today
+        is_base = i == 0
 
-    # Mods happen over the life of the contract, but a *test* document should
-    # not be dated in the future. Cap every action at today so no mod lands
-    # after the current date.
-    today = datetime.date.today()
+        # When this period's money started arriving. The base period is funded by
+        # the award; an option is funded by the mod that exercised it, which is
+        # signed within the notice window before the period starts (FAR 52.217-9)
+        # — never long before, and never after the period is under way.
+        if is_base:
+            opened = effective
+        else:
+            opened = max(
+                effective, p["pop_start"] - datetime.timedelta(days=rng.randint(0, 45))
+            )
+        opened = min(opened, today)
+
+        # How many actions funded this period. Fully funded means exactly one:
+        # the whole period is obligated in a single stroke. Otherwise money came
+        # in tranches — more of them for a period that has run its course than
+        # for one still early in flight.
+        if full_funding:
+            n = 1
+        else:
+            n = 1 + (rng.randint(1, 3) if closed else rng.randint(0, 2)) + extra_mods
+
+        # Split the period's funded total into that many round tranches, the last
+        # absorbing the remainder so the sum is exact.
+        step = _obligation_step(funded_total / n)
+        weights = [rng.uniform(0.7, 1.3) for _ in range(n)]
+        wsum = sum(weights)
+        amounts = [_round_to(funded_total * w / wsum, step) for w in weights[:-1]]
+        amounts = [a for a in amounts if a > 0]
+        amounts.append(_round_money(funded_total - sum(amounts)))
+
+        # Dates: the opening action, then the rest spread across the part of the
+        # period that has actually happened.
+        last = min(p["pop_end"], today)
+        dates = [opened]
+        for k in range(1, len(amounts)):
+            span = max((last - opened).days, 0)
+            dates.append(opened + datetime.timedelta(days=span * k // len(amounts)))
+
+        # Each action's dollars, attributed to this period's CLINs in the order
+        # funding lands: labor first, then travel/ODC/materials.
+        queue = [
+            [c["clin"], c.get("acrn"), c.get("loa"), float(c["funded"])]
+            for c in sorted(clins, key=lambda x: not x.get("is_labor"))
+        ]
+        qi = 0
+        for k, (amount, date) in enumerate(zip(amounts, dates)):
+            lines = {}
+            amt = amount
+            while amt > 0.005 and qi < len(queue):
+                clin, acrn, loa, rem = queue[qi]
+                take = min(amt, rem)
+                if clin in lines:
+                    lines[clin]["amount"] += take
+                else:
+                    lines[clin] = {
+                        "clin": clin,
+                        "acrn": acrn,
+                        "loa": loa,
+                        "amount": take,
+                    }
+                amt -= take
+                queue[qi][3] = rem - take
+                if queue[qi][3] <= 0.005:
+                    qi += 1
+            for line in lines.values():
+                line["amount"] = _round_money(line["amount"])
+            if k == 0:
+                kind = "award" if is_base else "option_exercise"
+            else:
+                kind = "incremental_funding"
+            actions.append(
+                {
+                    "kind": kind,
+                    "period": p["name"],
+                    "date": min(date, today),
+                    "amount": amount,
+                    "funding_lines": list(lines.values()),
+                }
+            )
+
+    actions.sort(key=lambda a: a["date"])
     history = []
     cumulative = 0.0
-    date = effective
-    for i, amount in enumerate(increments):
-        cumulative = _round_money(cumulative + amount)
-        if i == 0:
+    mod_i = 0
+    for a in actions:
+        cumulative = _round_money(cumulative + a["amount"])
+        if a["kind"] == "award":
             mod, action = "Award", "Initial award / base-period funding"
         else:
-            mod = f"P{i:05d}"
-            # Every entry here carries a positive obligation increment, so the
-            # action must be one that actually moves money — incremental funding
-            # or an option exercise. (A pure administrative modification obligates
-            # nothing, so it has no place in the obligation history.)
+            mod_i += 1
+            mod = f"P{mod_i:05d}"
             if mod_types:
-                key = mod_types[(i - 1) % len(mod_types)]
+                key = mod_types[(mod_i - 1) % len(mod_types)]
                 action = _MOD_TYPE_ACTIONS.get(key, key)
+            elif a["kind"] == "option_exercise":
+                action = f"Exercise option period ({a['period']})"
             else:
-                action = rng.choice(
-                    [
-                        "Incremental funding (FAR 52.232-22)",
-                        "Exercise option period",
-                    ]
-                )
+                action = "Incremental funding (FAR 52.232-22)"
         history.append(
             {
                 "mod": mod,
-                "date": min(date, today),
+                "date": a["date"],
                 "action": action,
-                "amount": amount,
+                "amount": a["amount"],
                 "cumulative_obligated": cumulative,
+                "funding_lines": a["funding_lines"],
             }
         )
-        date = min(date + datetime.timedelta(days=rng.randint(60, 180)), today)
     return history
+
+
+def _stamp_award_funding(periods, history):
+    """Record what each CLIN was obligated *at award* as `funded_at_award`.
+
+    An award form is signed once: its accounting data can only show the money
+    obligated by that signature. `funded` is the cumulative as of today, which is
+    the right figure for a funding summary or for a burn tool that has ingested
+    the mod trail — but printing it on the award would have the form cite
+    obligations made by mods that did not exist yet.
+    """
+    at_award = {}
+    for action in history:
+        if action["mod"] != "Award":
+            continue
+        for line in action["funding_lines"]:
+            at_award[line["clin"]] = at_award.get(line["clin"], 0.0) + line["amount"]
+    for p in periods:
+        for c in p["clins"]:
+            c["funded_at_award"] = _round_money(at_award.get(c["clin"], 0.0))
 
 
 def _add_year(d):
@@ -959,7 +1024,7 @@ def contract_to_sf1449(contract):
         _P
         + "accountingdata[0]": (
             f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-            f"Obligated to date {_fmt_money(_base_obligation(c))} of "
+            f"Obligated by this award {_fmt_money(_base_obligation(c))} of "
             f"{_fmt_money(c['total_ceiling'])} ceiling."
         ),
         # Block 26 total award = the awarded (base-year) value.
@@ -1037,7 +1102,7 @@ def contract_to_sf26(contract):
     base_value = _fmt_money(c["periods"][0]["ceiling"] if c["periods"] else 0.0)
     accounting = (
         f"Appropriation FY{c['effective_date'].year % 100:02d}; "
-        f"Obligated to date {_fmt_money(_base_obligation(c))} of "
+        f"Obligated by this award {_fmt_money(_base_obligation(c))} of "
         f"{_fmt_money(c['total_ceiling'])} ceiling."
     )
     values = {
@@ -1257,6 +1322,23 @@ def _funding_summary_row(rng, faker, index, opts=None):
         "total_ceiling": _fmt_money(c["total_ceiling"]),
         "total_obligated": _fmt_money(c["total_obligated"]),
         "unfunded_balance": _fmt_money(c["unfunded_balance"]),
+        # The per-CLIN funding picture as of today: award plus every mod since.
+        # This is the document that can state it — the award form is a snapshot of
+        # its own signing and shows only what it obligated (funded_at_award).
+        # Un-exercised option CLINs are listed with no obligation, which is what
+        # makes the difference between priced and funded legible.
+        "clin_funding": [
+            {
+                "clin": cl["clin"],
+                "period": p["name"],
+                "title": cl["title"],
+                "ceiling": _fmt_money(cl["ceiling"]),
+                "obligated": _fmt_money(cl.get("funded") or 0),
+                "acrn": cl.get("acrn") or "--",
+            }
+            for p in c["periods"]
+            for cl in p["clins"]
+        ],
         "obligation_history": [
             {
                 "mod": m["mod"],
@@ -1452,6 +1534,20 @@ def funding_summary_blocks(r):
             "name": "unfunded_balance",
             "label": "Unfunded Balance",
             "value": r["unfunded_balance"],
+        },
+        {
+            "type": "table",
+            "name": "clin_funding",
+            "label": "Funding by CLIN (cumulative, as of today)",
+            "rows": r["clin_funding"],
+            "columns": [
+                ("clin", "CLIN", 0.10),
+                ("period", "Period", 0.18),
+                ("title", "Supplies/Services", 0.30),
+                ("ceiling", "Ceiling", 0.16),
+                ("obligated", "Obligated", 0.16),
+                ("acrn", "ACRN", 0.10),
+            ],
         },
         {
             "type": "table",

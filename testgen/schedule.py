@@ -129,10 +129,14 @@ def rate_schedule_bytes(contract, form_title, section_label):
                 f"CLIN {clin.get('clin', '')} - {clin.get('title', '')} "
                 f"({clin.get('type', '')}) - Ceiling {_money(clin.get('ceiling'))}"
             )
-            funded = clin.get("funded")
-            if funded is not None:
+            # Award-time obligation only. This schedule is an attachment to the
+            # award form, which is signed once — it cannot cite money that later
+            # SF-30 mods obligated. `funded` (the cumulative as of today) belongs
+            # on a funding summary, not here.
+            funded = clin.get("funded_at_award")
+            if funded:
                 acrn = clin.get("acrn")
-                head += f" - Funded {_money(funded)}"
+                head += f" - Obligated at award {_money(funded)}"
                 head += f" (ACRN {acrn})" if acrn else ""
             pdf.multi_cell(usable, 5, _latin1(head), new_x="LMARGIN", new_y="NEXT")
 
@@ -177,11 +181,14 @@ def rate_schedule_bytes(contract, form_title, section_label):
     # dollars obligated against it. This is the award's funding citation — the
     # per-CLIN obligated amounts a contractor bills against, which SF-30 mods
     # later amend. Only funded (exercised, obligated) CLINs appear.
+    # Only the CLINs this award itself obligated money against. An option period
+    # is priced in the schedule above but carries no accounting data until the
+    # SF-30 that exercises it — so it does not appear here.
     funded_clins = [
         c
         for p in contract.get("periods", [])
         for c in p.get("clins", [])
-        if (c.get("funded") or 0) > 0
+        if (c.get("funded_at_award") or 0) > 0
     ]
     if funded_clins:
         pdf.ln(2)
@@ -201,10 +208,11 @@ def rate_schedule_bytes(contract, form_title, section_label):
         pdf.set_font("Helvetica", "", 8)
         total_obligated = 0.0
         for c in funded_clins:
-            total_obligated += float(c.get("funded") or 0)
+            funded = float(c.get("funded_at_award") or 0)
+            total_obligated += funded
             line = (
                 f"ACRN {c.get('acrn') or '--'}: {c.get('loa') or ''}    "
-                f"CLIN {c.get('clin') or ''}    Obligated {_money(c.get('funded'))}"
+                f"CLIN {c.get('clin') or ''}    Obligated {_money(funded)}"
             )
             pdf.multi_cell(usable, 5, _latin1(line), new_x="LMARGIN", new_y="NEXT")
         # Total presently allotted. The FAR 52.232-22 Limitation of Funds
@@ -213,10 +221,7 @@ def rate_schedule_bytes(contract, form_title, section_label):
         # every exercised dollar up front and is under no such limitation, so
         # printing the clause on it is a contradiction on the face of the form.
         allotted_ceiling = sum(float(c.get("ceiling") or 0) for c in funded_clins)
-        statement = (
-            f"Total amount presently allotted to this contract: "
-            f"{_money(total_obligated)}."
-        )
+        statement = f"Total amount obligated by this award: {_money(total_obligated)}."
         if total_obligated + 0.5 < allotted_ceiling:
             statement += (
                 " Incremental funding is subject to FAR 52.232-22, "
