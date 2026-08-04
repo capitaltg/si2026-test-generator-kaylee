@@ -176,3 +176,54 @@ def test_full_funding_odds_are_unchanged_for_the_original_four_types():
 def test_an_unknown_pinned_type_falls_back_to_a_drawn_one():
     c = _award(5, contract_type="Cost Plus Percentage Of Cost")
     assert c["contract_type"] in ct.KNOWN_TYPES
+
+
+def _sheet_text(contract):
+    import io
+
+    from pypdf import PdfReader
+
+    from testgen.schedule import sf26_section_b
+
+    reader = PdfReader(io.BytesIO(sf26_section_b(contract)))
+    return "\n".join(page.extract_text() for page in reader.pages)
+
+
+def test_a_fully_funded_fixed_price_clin_states_its_price_once():
+    """A firm-fixed-price CLIN obligates its whole price at award, so stating
+    "Firm-Fixed Price $X - Obligated at award $X" prints one number twice and
+    invites the reader to hunt for a difference that cannot exist. The ACRN is a
+    genuinely separate fact and still prints."""
+    for seed in range(10):
+        text = _sheet_text(_award(seed, contract_type="FFP", pop_in_progress=True))
+        # Only the priced labor lines. A cost-reimbursable travel / ODC CLIN
+        # riding on a fixed-price award really is capped by a ceiling, and the
+        # accounting block below the table really does state obligations — both
+        # are correct, and neither is the duplicate this pins down.
+        labor_heads = [
+            ln for ln in text.splitlines() if ln.startswith("CLIN ") and "(FFP)" in ln
+        ]
+        assert labor_heads, f"seed {seed}: no priced labor CLIN on the sheet"
+        for head in labor_heads:
+            assert "Firm-Fixed Price" in head, head
+            assert "Ceiling" not in head, head
+            assert "Obligated at award" not in head, head
+            # A base-period CLIN is funded at award, so its accounting citation
+            # prints; an option-period CLIN carries none until it is exercised.
+            if head.startswith("CLIN 0"):
+                assert "ACRN" in head, head
+
+
+def test_cost_and_fee_are_priced_rows_in_the_table_not_a_note_below_it():
+    """The estimated-cost / fee split is where a Section B exhibit states it —
+    priced lines footing to the CLIN amount, in the Extended Amount column."""
+    text = _sheet_text(_award(11, contract_type="CPFF", pop_in_progress=True))
+    assert "Total Estimated Cost" in text
+    assert "Fixed Fee" in text
+    assert "Total CLIN Amount (Cost + Fee)" in text
+    # An incrementally funded cost CLIN does have two distinct figures, so the
+    # award-time obligation is still worth stating there.
+    incr = _sheet_text(
+        _award(11, contract_type="CPFF", funding="incremental", pop_in_progress=True)
+    )
+    assert "Obligated at award" in incr
