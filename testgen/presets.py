@@ -234,7 +234,14 @@ def build_contract(rng, faker, index, opts=None):
     set_aside = _pick_set_aside(rng, opts.get("set_aside"))
     solicitation_issue = effective - datetime.timedelta(days=rng.randint(45, 90))
     offer_due = effective - datetime.timedelta(days=rng.randint(10, 30))
-    labor_type = "FFP" if contract_type == "FFP" else rng.choice(["T&M", "CPFF"])
+    # The type stamped on a labor CLIN has to agree with the award's own contract
+    # type — the header is the source of truth. IDIQ is the one exception: orders
+    # placed under a vehicle are priced individually (FAR 16.504), so a per-order
+    # T&M-or-CPFF draw is the real answer there. The draw is still taken for every
+    # non-FFP type (and discarded where the header decides it) so the seeded stream
+    # keeps its current shape and no existing bundle moves.
+    order_pricing = None if contract_type == "FFP" else rng.choice(["T&M", "CPFF"])
+    labor_type = order_pricing if contract_type == "IDIQ" else contract_type
 
     # Office DoDAAC-style codes (the CODE boxes beside "issued by" / "administered
     # by") and the finance identifiers a processed/paid award record carries.
