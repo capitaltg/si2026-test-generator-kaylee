@@ -9,12 +9,20 @@ from __future__ import annotations
 
 import datetime
 
-from testgen.presets import build_scenario, generate_preset
+from testgen.presets import _active_period, build_scenario, generate_preset
 
 
 def _base_pop(scenario):
     base = scenario["contract"]["periods"][0]
     return base["pop_start"], base["pop_end"]
+
+
+def _active_pop(scenario):
+    """The period the contract is performing in. `pop_in_progress` anchors today
+    inside one of the award's periods — not necessarily the base year, since a
+    monitored contract is often in an option year."""
+    active = _active_period(scenario["contract"])
+    return active["pop_start"], active["pop_end"]
 
 
 def test_default_effective_date_is_unchanged_and_deterministic():
@@ -31,30 +39,42 @@ def test_default_generation_is_reproducible():
     assert a == b
 
 
-def test_pop_in_progress_anchors_base_year_to_today():
-    scenario = build_scenario(42, {"pop_in_progress": True})
-    start, end = _base_pop(scenario)
+def test_pop_in_progress_anchors_a_period_to_today():
     today = datetime.date.today()
-    assert start <= today <= end
-    # Today should sit well inside the base year (~5-10 months in), never at day 0.
-    weeks_in = (today - start).days // 7
-    assert 20 <= weeks_in <= 44
+    for seed in (42, 7, 13, 19, 21):
+        scenario = build_scenario(seed, {"pop_in_progress": True})
+        start, end = _active_pop(scenario)
+        assert start <= today <= end
+        # Today should sit well inside that period (~5-10 months in), never at
+        # day 0.
+        weeks_in = (today - start).days // 7
+        assert 20 <= weeks_in <= 44
+        # And the period in flight has to be one the contract actually holds.
+        active = _active_period(scenario["contract"])
+        assert active["exercised"]
 
 
 def test_timesheet_weeks_fall_inside_pop_when_on():
-    scenario = build_scenario(42, {"pop_in_progress": True})
-    start, end = _base_pop(scenario)
-    piid = scenario["contract"]["piid"]
-    base_clins = {c["clin"] for c in scenario["contract"]["periods"][0]["clins"]}
+    # Hours must charge the CLINs of the period the contract is actually
+    # performing in, and fall inside that period's window. Anchoring the roster
+    # to the base year while today sits in an option year would bill a period
+    # that closed a year ago.
+    for seed in (42, 7, 13, 19, 21):
+        scenario = build_scenario(seed, {"pop_in_progress": True})
+        start, end = _active_pop(scenario)
+        piid = scenario["contract"]["piid"]
+        active_clins = {
+            c["clin"] for c in _active_period(scenario["contract"])["clins"]
+        }
 
-    rows = generate_preset(
-        "govcon_timesheet", rows=25, seed=42, opts={"pop_in_progress": True}
-    )
-    for row in rows:
-        week = datetime.date.fromisoformat(row["week_ending"])
-        assert start <= week <= end
-        assert row["contract_no"] == piid
-        assert row["charge_code"] in base_clins
+        rows = generate_preset(
+            "govcon_timesheet", rows=25, seed=seed, opts={"pop_in_progress": True}
+        )
+        for row in rows:
+            week = datetime.date.fromisoformat(row["week_ending"])
+            assert start <= week <= end
+            assert row["contract_no"] == piid
+            assert row["charge_code"] in active_clins
 
 
 def test_pop_option_does_not_leak_into_default_run():
