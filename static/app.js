@@ -417,13 +417,19 @@ const PRESET_OPTIONS = [
     key: "contract_type",
     type: "select",
     label: "Contract type",
-    hint: "Pin the contract type instead of a random one.",
+    hint:
+      "Pin the pricing type instead of a random one. Each type states the cost " +
+      "elements its FAR subpart requires and carries the funding clause that " +
+      "governs it.",
     choices: [
-      ["", "Any (random)"],
-      ["T&M", "T&M"],
-      ["CPFF", "CPFF"],
-      ["FFP", "FFP"],
-      ["IDIQ", "IDIQ"],
+      ["", "Any (weighted random)"],
+      ["FFP", "FFP - Firm-Fixed-Price"],
+      ["T&M", "T&M - Time-and-Materials"],
+      ["CPFF", "CPFF - Cost-Plus-Fixed-Fee"],
+      ["CPIF", "CPIF - Cost-Plus-Incentive-Fee"],
+      ["CPAF", "CPAF - Cost-Plus-Award-Fee"],
+      ["FPI", "FPI - Fixed-Price Incentive"],
+      ["IDIQ", "IDIQ - Indefinite-Delivery vehicle"],
     ],
   },
   {

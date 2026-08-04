@@ -30,6 +30,7 @@ from __future__ import annotations
 import datetime
 import string
 
+from . import contract_types
 from .fields import _NAICS, gen_alnum as _alnum, gen_uei as _uei
 from .schedule import sf1449_continuation, sf26_section_b
 
@@ -220,10 +221,10 @@ def build_contract(rng, faker, index, opts=None):
         "address": faker.address().replace("\n", ", "),
         "phone": faker.numerify("(###) ###-####"),
     }
-    # contract_type is opt-pinnable; unset => the usual random pick.
-    contract_type = opts.get("contract_type") or rng.choice(
-        ["T&M", "CPFF", "FFP", "IDIQ"]
-    )
+    # contract_type is opt-pinnable to any of the seven specified types; unset
+    # draws one by weight (see contract_types._SPECS — fixed-price dominates,
+    # CPIF/CPAF/FPI are rare).
+    contract_type = contract_types.pick_type(rng, opts.get("contract_type"))
 
     # Acquisition metadata a real award records: the NAICS + size standard the
     # buy was solicited under, the set-aside, and the pre-award solicitation
@@ -238,10 +239,18 @@ def build_contract(rng, faker, index, opts=None):
     # type — the header is the source of truth. IDIQ is the one exception: orders
     # placed under a vehicle are priced individually (FAR 16.504), so a per-order
     # T&M-or-CPFF draw is the real answer there. The draw is still taken for every
-    # non-FFP type (and discarded where the header decides it) so the seeded stream
-    # keeps its current shape and no existing bundle moves.
-    order_pricing = None if contract_type == "FFP" else rng.choice(["T&M", "CPFF"])
+    # type that could conceivably be priced per-order (and discarded where the
+    # header decides it) so that pinning a type does not shift the seeded stream
+    # relative to any other type. A fixed-price award consumes no draw.
+    order_pricing = (
+        None
+        if contract_types.is_fixed_price(contract_type)
+        else rng.choice(contract_types.ORDER_PRICING_TYPES)
+    )
     labor_type = order_pricing if contract_type == "IDIQ" else contract_type
+    # What the type carries: its cost elements, its fee rate, and (stamped below,
+    # once the funding profile is drawn) the clause that governs its money.
+    pricing = contract_types.build_pricing(rng, contract_type, order_pricing)
 
     # Office DoDAAC-style codes (the CODE boxes beside "issued by" / "administered
     # by") and the finance identifiers a processed/paid award record carries.
@@ -260,7 +269,9 @@ def build_contract(rng, faker, index, opts=None):
     # pop_in_progress already needed it above.
     if option_years is None:
         option_years = rng.randint(1, 4)
-    periods = _build_periods(rng, faker, effective, option_years, labor_type, opts)
+    periods = _build_periods(
+        rng, faker, effective, option_years, labor_type, pricing, opts
+    )
 
     # Roll periods up into the total ceiling (invariant 2).
     total_ceiling = _round_money(sum(p["ceiling"] for p in periods))
@@ -280,6 +291,7 @@ def build_contract(rng, faker, index, opts=None):
     # show, because an award is signed once and cannot cite obligations that
     # later mods made. See _funding_actions / _stamp_award_funding.
     full_funding = _funds_in_full(rng, contract_type, opts)
+    contract_types.resolve_funding_clause(pricing, full_funding)
     total_obligated = _allocate_funding(rng, periods, effective, full_funding)
     obligation_history = _funding_actions(rng, periods, effective, full_funding, opts)
     _stamp_award_funding(periods, obligation_history)
@@ -319,6 +331,8 @@ def build_contract(rng, faker, index, opts=None):
             datetime.date.today(),
         ),
         "contract_type": contract_type,
+        "pricing": pricing,
+        "fully_funded": full_funding,
         "total_ceiling": total_ceiling,
         "total_obligated": total_obligated,
         "unfunded_balance": _round_money(total_ceiling - total_obligated),
@@ -397,7 +411,7 @@ def _effective_date(rng, opts=None, option_years=0):
     return start + datetime.timedelta(days=rng.randint(0, (end - start).days))
 
 
-def _build_periods(rng, faker, effective, option_years, labor_type, opts):
+def _build_periods(rng, faker, effective, option_years, labor_type, pricing, opts):
     """A contiguous list of 12-month periods (base + options). Each period's
     ceiling is the sum of its CLINs (invariant 1); options after the first
     un-exercised one stay un-exercised (you cannot skip an option year)."""
@@ -432,7 +446,7 @@ def _build_periods(rng, faker, effective, option_years, labor_type, opts):
                 still_exercised = still_exercised and started and roll
             exercised = still_exercised
 
-        clins = _build_clins(rng, faker, pi, labor_type, opts)
+        clins = _build_clins(rng, faker, pi, labor_type, pricing, opts)
         ceiling = _round_money(sum(c["ceiling"] for c in clins))
         periods.append(
             {
@@ -459,12 +473,17 @@ _TASK_AREAS = [
 ]
 
 
-def _build_clins(rng, faker, period_index, labor_type, opts):
+def _build_clins(rng, faker, period_index, labor_type, pricing, opts):
     """The CLINs for one period, randomized but realistic: one to three labor
     CLINs (a period is sometimes split across task areas) plus the usual — but
     not guaranteed — cost-reimbursable travel and ODC lines. Each labor CLIN's
     ceiling is built from its labor lines so it reconciles (invariant 4); CLINs
-    are numbered sequentially with the period digit (invariant 5)."""
+    are numbered sequentially with the period digit (invariant 5).
+
+    Each labor CLIN also states the cost elements its pricing type requires
+    (FAR 16.2/16.3/16.4/16.6) — for a cost-reimbursement type, the estimated
+    cost and the fee that sum back to the ceiling. The ceiling itself is
+    unchanged by that decomposition, so invariants 1-4 are untouched."""
     digit = _period_digit(period_index)
     clins = []
 
@@ -484,18 +503,18 @@ def _build_clins(rng, faker, period_index, labor_type, opts):
             if area
             else "Professional Services (Labor)"
         )
-        clins.append(
-            {
-                "clin": _next_clin(),
-                "period_index": period_index,
-                "title": title,
-                "type": labor_type,
-                "is_labor": True,
-                "ceiling": ceiling,
-                "est_hours": sum(l["est_hours"] for l in lines),
-                "labor_rates": lines,
-            }
-        )
+        clin = {
+            "clin": _next_clin(),
+            "period_index": period_index,
+            "title": title,
+            "type": labor_type,
+            "is_labor": True,
+            "ceiling": ceiling,
+            "est_hours": sum(l["est_hours"] for l in lines),
+            "labor_rates": lines,
+        }
+        clin.update(contract_types.clin_cost_elements(pricing, ceiling))
+        clins.append(clin)
 
     # Cost-reimbursable support CLINs — common, but not on every contract.
     if rng.random() < 0.85:
@@ -505,6 +524,7 @@ def _build_clins(rng, faker, period_index, labor_type, opts):
                 period_index,
                 "Travel (Cost-Reimbursable, No Fee)",
                 _round_to(labor_total * rng.uniform(0.02, 0.06), 1000),
+                "travel",
             )
         )
     if rng.random() < 0.75:
@@ -514,12 +534,18 @@ def _build_clins(rng, faker, period_index, labor_type, opts):
                 period_index,
                 "Other Direct Costs / Materials (Cost, No Fee)",
                 _round_to(labor_total * rng.uniform(0.01, 0.05), 1000),
+                # On a T&M award this is the element the hourly rates explicitly
+                # do NOT cover: under FAR 52.232-7 the fixed rates carry labor
+                # and profit, and materials are reimbursed separately at cost.
+                # Naming it makes that split readable instead of implied by a
+                # CLIN title.
+                "reimbursable_materials",
             )
         )
     return clins
 
 
-def _cost_clin(number, period_index, title, ceiling):
+def _cost_clin(number, period_index, title, ceiling, cost_element="cost"):
     """A cost-reimbursable, no-fee CLIN (travel / ODC) — no labor lines."""
     return {
         "clin": number,
@@ -528,6 +554,7 @@ def _cost_clin(number, period_index, title, ceiling):
         "type": "COST",
         "is_labor": False,
         "ceiling": ceiling,
+        "cost_element": cost_element,
         "labor_rates": [],
     }
 
@@ -617,12 +644,12 @@ def _loa(rng, effective):
 # where none is.
 #
 # Fixed-price is always fully funded. The cost-type odds lean incremental
-# because that is where the authority is routinely used. When per-type funding
-# specifications land (cost, the cost-plus variants, T&M), this table is what
-# they extend, and `_funds_in_full` is where a type-specific rule replaces a
-# coin flip.
-_FULL_FUNDING_ODDS = {"FFP": 1.0, "T&M": 0.5, "IDIQ": 0.5, "CPFF": 0.35}
-_DEFAULT_FULL_FUNDING_ODDS = 0.5
+# because that is where the authority is routinely used.
+#
+# These odds are now one field of each type's specification rather than a table
+# of their own — see `contract_types._SPECS`. The values for the four original
+# types are unchanged (FFP 1.0, T&M 0.5, IDIQ 0.5, CPFF 0.35); the three new
+# cost-plus variants inherit CPFF's, and FPI is fixed-price.
 
 
 def _funds_in_full(rng, contract_type, opts):
@@ -635,11 +662,13 @@ def _funds_in_full(rng, contract_type, opts):
     if pinned == "full":
         return True
     if pinned == "incremental":
-        # FFP is fully funded as a matter of law and policy, not chance; asking
-        # for an incrementally funded fixed-price award is asking for a document
-        # that would not exist.
-        return contract_type == "FFP"
-    return roll < _FULL_FUNDING_ODDS.get(contract_type, _DEFAULT_FULL_FUNDING_ODDS)
+        # A fixed-price award is fully funded as a matter of law and policy, not
+        # chance; asking for an incrementally funded fixed-price award is asking
+        # for a document that would not exist. (Incrementally funded *fixed-price*
+        # awards do exist under the DFARS 252.232-7007 allotment schedule — that
+        # is a distinct mechanism, ticketed separately as #56.)
+        return contract_types.is_fixed_price(contract_type)
+    return roll < contract_types.full_funding_odds(contract_type)
 
 
 def _obligation_step(target):
@@ -1242,10 +1271,8 @@ def contract_to_sf30(contract, mod=None):
     )
 
     # Block 1 "Contract ID Code" is a single award-instrument letter, not the
-    # contract type name; map the type to a plausible code.
-    id_code = {"IDIQ": "D", "FFP": "C", "T&M": "C", "CPFF": "C"}.get(
-        c["contract_type"], "C"
-    )
+    # contract type name; the type's spec carries its code.
+    id_code = contract_types.id_code(c["contract_type"])
 
     values = {
         # Block 2 = the amendment/modification number (this action).
@@ -1303,7 +1330,14 @@ def contract_to_sf30(contract, mod=None):
         )
     else:
         values[_P + "CheckBox13A[0]"] = "/1"
-        values[_P + "A13[0]"] = "FAR 52.232-22, Limitation of Funds"
+        # Block 13A cites the authority for the change. The limitation clause the
+        # award is actually under depends on its type and funding profile — a
+        # fully funded cost contract is under 52.232-20, not -22 — so cite what
+        # governs this award rather than assuming the incremental case.
+        values[_P + "A13[0]"] = (
+            c.get("pricing", {}).get("funding_clause")
+            or "FAR 52.232-22, Limitation of Funds"
+        )
         values[_P + "IsNot[0]"] = "/1"
         values[_P + "Description[0]"] = (
             "The purpose of this modification is to obligate incremental funding. "
@@ -1358,6 +1392,10 @@ def _funding_summary_row(rng, faker, index, opts=None):
         "contractor": c["contractor"]["name"],
         "agency": c["agency"],
         "contract_type": c["contract_type"],
+        # The clause that actually limits payment on this contract. A funding
+        # summary that states the ceiling and the obligation without it leaves
+        # the reader to guess which limit governs.
+        "governing_clause": (c.get("pricing") or {}).get("funding_clause", ""),
         "pop": _pop(c),
         "contracting_officer": c["contracting_officer"],
         "total_ceiling": _fmt_money(c["total_ceiling"]),
@@ -1403,7 +1441,37 @@ def _award_letter_row(rng, faker, index, opts=None):
         "base_value": _fmt_money(c["periods"][0]["ceiling"] if c["periods"] else 0.0),
         "total_ceiling": _fmt_money(c["total_ceiling"]),
         "contracting_officer": c["contracting_officer"],
+        "contract_type": c["contract_type"],
+        "funding_statement": _funding_statement(c),
     }
+
+
+def _funding_statement(c):
+    """The letter's funding-limitation paragraph, for the contract it is about.
+
+    A notice of award telling a fixed-price contractor that its contract is
+    incrementally funded under FAR 52.232-22 is a wrong letter, not a generic
+    one — so the sentence follows the type and the funding profile."""
+    pricing = c.get("pricing") or {}
+    clause = pricing.get("funding_clause")
+    if not clause:
+        return (
+            "This contract is fully funded at award. The Contractor bears "
+            "responsibility for performance at the agreed price."
+        )
+    if not pricing.get("fully_funded"):
+        return (
+            f"This contract is incrementally funded in accordance with {clause}; "
+            "the Government is not obligated to reimburse the Contractor for "
+            "costs incurred in excess of the total amount obligated, and "
+            "additional funds will be provided by separate modification."
+        )
+    return (
+        f"This contract is fully funded at award and is subject to {clause}; the "
+        "Government is not obligated to reimburse the Contractor for costs "
+        "incurred in excess of the amount stated, and the Contractor shall "
+        "notify the Contracting Officer before incurring them."
+    )
 
 
 def _record_sheet_row(rng, faker, index, opts=None):
@@ -1415,6 +1483,8 @@ def _record_sheet_row(rng, faker, index, opts=None):
         "cage": c["contractor"]["cage"],
         "agency": c["agency"],
         "contract_type": c["contract_type"],
+        "contract_type_far": (c.get("pricing") or {}).get("far", ""),
+        "governing_clause": (c.get("pricing") or {}).get("funding_clause", ""),
         "award_date": _fmt_date(c["effective_date"]),
         "pop": _pop(c),
         "contracting_officer": c["contracting_officer"],
@@ -1559,6 +1629,12 @@ def funding_summary_blocks(r):
         },
         {
             "type": "field",
+            "name": "governing_clause",
+            "label": "Governing Funding Clause",
+            "value": r.get("governing_clause") or "None (fixed-price)",
+        },
+        {
+            "type": "field",
             "name": "pop",
             "label": "Period of Performance",
             "value": r["pop"],
@@ -1612,7 +1688,16 @@ def record_sheet_blocks(r):
             "type": "pair",
             "fields": [
                 ("contract_no", "Contract No.", r["contract_no"]),
-                ("contract_type", "Contract Type", r["contract_type"]),
+                (
+                    "contract_type",
+                    "Contract Type",
+                    r["contract_type"]
+                    + (
+                        f" (FAR {r['contract_type_far']})"
+                        if r.get("contract_type_far")
+                        else ""
+                    ),
+                ),
             ],
         },
         {
@@ -1670,10 +1755,7 @@ def _award_letter_text(r):
         f"been accepted as submitted.\n\n"
         f"The amount obligated for the base period of performance is {r['base_value']}. "
         f"The total potential value of this contract, inclusive of all option periods, "
-        f"is {r['total_ceiling']}. This contract is incrementally funded in accordance "
-        f"with FAR 52.232-22, Limitation of Funds; the Government is not obligated to "
-        f"reimburse the Contractor for costs incurred in excess of the total amount "
-        f"obligated, and additional funds will be provided by separate modification.\n\n"
+        f"is {r['total_ceiling']}. {r.get('funding_statement', '')}\n\n"
         f"No work shall be performed and no costs incurred prior to the effective date "
         f"shown above. {r['contracting_officer']} is the Contracting Officer for this "
         f"award and is the only individual authorized to modify the terms of this "
