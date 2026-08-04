@@ -44,19 +44,24 @@ _COLS = [
     ("Clearance", 25, "L", "clearance"),
 ]
 
-# The same grid, priced the way a cost-reimbursement exhibit prices it. A CPFF
-# Section B does not state a loaded rate at all — the government is not buying
-# hours at a price, it is reimbursing cost — so the price columns become direct
-# labor, and the pools that burden it are the rows underneath (see
-# `_buildup_rows`). Identical widths, so the summary block's geometry is shared.
+# The cost-reimbursement exhibit, which is a different table and not a variant
+# of the one above. A CPFF Section B does not state a loaded rate at all — the
+# government is not buying qualified hours at a price, it is reimbursing
+# allowable cost — so the price columns become direct labor and the pools that
+# burden it are the rows underneath (see `_buildup_rows`).
+#
+# The qualification columns come off with the price. A minimum education or a
+# clearance level is on a rate schedule to justify the rate being charged; where
+# there is no rate being charged there is nothing for them to justify, and a
+# real cost buildup does not carry them — the LCAT qualification floor lives in
+# Section H or an LCAT-description attachment instead. Every one of those fields
+# is still generated on the labor line for a consumer to read; this is only the
+# question of what the pricing exhibit prints.
 _COST_COLS = [
-    ("Labor Category (LCAT)", 52, "L", "lcat"),
-    ("Direct Rate/Hr", 26, "R", "direct_rate"),
-    ("Est. Hrs", 18, "R", "est_hours"),
-    ("Direct Labor Cost", 30, "R", "direct_amount"),
-    ("Min. Education", 28, "L", "min_education"),
-    ("Min. Yrs", 15, "C", "min_experience_yrs"),
-    ("Clearance", 25, "L", "clearance"),
+    ("Labor Category (LCAT)", 84, "L", "lcat"),
+    ("Direct Rate/Hr", 34, "R", "direct_rate"),
+    ("Est. Hrs", 30, "R", "est_hours"),
+    ("Direct Labor Cost", 46, "R", "direct_amount"),
 ]
 
 _MONEY_KEYS = ("loaded_rate", "amount", "direct_rate", "direct_amount")
@@ -377,7 +382,7 @@ def rate_schedule_bytes(contract, form_title, section_label, cost_section_label=
             rows += _summary_rows(clin, pricing, hours, total)
             # The label on these rows runs across the rate column as well as the
             # category column. It has to: "Overhead @ 48.5% of Direct Labor +
-            # Fringe" does not fit in the 52mm a labor category needs, and every
+            # Fringe" does not fit in the width a labor category needs, and every
             # one of these rows leaves the rate column blank anyway — none of
             # them is priced at a rate per hour. A real exhibit runs the element
             # label across the description block the same way.
@@ -393,7 +398,12 @@ def rate_schedule_bytes(contract, form_title, section_label, cost_section_label=
                     align="R",
                 )
                 pdf.cell(cols[3][1], 6, _latin1(_money(amount)), border=1, align="R")
-                pdf.cell(rest, 6, "", border=1)
+                # The qualification columns, blank, where the table has them. A
+                # zero-width cell is not a no-op in fpdf — width 0 means "run to
+                # the right margin" — so the cost exhibit, whose table ends at
+                # the amount column, must skip the call entirely.
+                if rest:
+                    pdf.cell(rest, 6, "", border=1)
                 pdf.ln(6)
             pdf.set_font("Helvetica", "", 8)
 
