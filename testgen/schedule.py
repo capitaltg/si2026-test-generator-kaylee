@@ -61,6 +61,57 @@ def _cell(pdf, text, w, align):
     pdf.cell(w, 6, _latin1(str(text)), border=1, align=align)
 
 
+def _pct(value):
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _cost_element_lines(clin, pricing):
+    """The cost-element statement a priced CLIN carries, as printable lines.
+
+    A cost-reimbursement CLIN states estimated cost and fee as two figures whose
+    sum is the total (FAR 16.306) — collapsing them into one blended ceiling is
+    the thing this generator used to do for every type alike. Fixed-price and
+    T&M CLINs state what they actually state instead.
+
+    The full cost-buildup exhibit — direct rates, indirect pools applied, fee on
+    its own line — is a separate page layout and belongs to #57. This is the
+    element statement, not the buildup.
+    """
+    element = (pricing or {}).get("fee_element")
+    if clin.get("estimated_cost") is not None:
+        label = {
+            "fixed_fee": "Fixed Fee",
+            "award_fee": "Base + Award Fee",
+            "target_fee": "Target Fee",
+        }.get(element, "Fee")
+        cost, fee = clin["estimated_cost"], clin.get("fee") or 0
+        return [
+            f"    Estimated Cost {_money(cost)}   +   {label} "
+            f"({_pct(clin.get('fee_rate'))}) {_money(fee)}   =   "
+            f"CLIN Total {_money(cost + fee)}"
+        ]
+    if clin.get("target_profit") is not None:
+        return [
+            f"    Target Cost {_money(clin['target_cost'])}   +   Target Profit "
+            f"({_pct(clin.get('fee_rate'))}) {_money(clin['target_profit'])}   =   "
+            f"Target Price {_money(clin.get('target_price'))}",
+            f"    Price Ceiling {_money(clin.get('ceiling_price'))} - costs above it "
+            f"are borne by the Contractor (FAR 16.403).",
+        ]
+    if clin.get("firm_price") is not None:
+        return [f"    Firm-Fixed Price {_money(clin['firm_price'])}."]
+    if clin.get("profit_in_rates"):
+        return [
+            f"    Ceiling Price {_money(clin.get('ceiling_price'))}. The fixed "
+            "hourly rates above include labor, indirect cost and profit; "
+            "materials are reimbursed separately at cost (FAR 52.232-7(a))."
+        ]
+    return []
+
+
 def _row_values(line):
     out = []
     for _, _, _, key in _COLS:
@@ -93,12 +144,24 @@ def rate_schedule_bytes(contract, form_title, section_label):
     pdf.cell(0, 6, _latin1(section_label), new_x="LMARGIN", new_y="NEXT")
 
     pdf.set_font("Helvetica", "", 9)
+    pricing = contract.get("pricing") or {}
     ident = (
         f"Contract No.: {contract.get('piid', '')}    "
         f"Contractor: {contract.get('contractor', {}).get('name', '')}    "
         f"Type: {contract.get('contract_type', '')}"
     )
     pdf.cell(0, 5, _latin1(ident), new_x="LMARGIN", new_y="NEXT")
+    # The type spelled out with its FAR authority, the way a negotiated award
+    # names the type it was awarded under.
+    if pricing.get("label"):
+        far = f" (FAR {pricing['far']})" if pricing.get("far") else ""
+        pdf.cell(
+            0,
+            5,
+            _latin1(f"Contract Type: {pricing['label']}{far}"),
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
     pdf.ln(3)
 
     def table_header():
@@ -174,8 +237,13 @@ def rate_schedule_bytes(contract, form_title, section_label):
             pdf.cell(_COLS[3][1], 6, _latin1(_money(total)), border=1, align="R")
             rest = sum(w for _, w, _, _ in _COLS[4:])
             pdf.cell(rest, 6, "", border=1)
-            pdf.ln(8)
+            pdf.ln(7)
             pdf.set_font("Helvetica", "", 8)
+
+            # The cost elements this CLIN states, per its pricing type.
+            for text in _cost_element_lines(clin, pricing):
+                pdf.multi_cell(usable, 5, _latin1(text), new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(2)
 
     # Accounting and Appropriation Data: which ACRN funds which CLIN and the
     # dollars obligated against it. This is the award's funding citation — the
@@ -215,18 +283,21 @@ def rate_schedule_bytes(contract, form_title, section_label):
                 f"CLIN {c.get('clin') or ''}    Obligated {_money(funded)}"
             )
             pdf.multi_cell(usable, 5, _latin1(line), new_x="LMARGIN", new_y="NEXT")
-        # Total presently allotted. The FAR 52.232-22 Limitation of Funds
-        # sentence belongs only on an award that is genuinely incrementally
-        # funded: a fully funded award (a fixed-price one, typically) allots
-        # every exercised dollar up front and is under no such limitation, so
-        # printing the clause on it is a contradiction on the face of the form.
+        # Total presently allotted, and the clause that limits payment against
+        # it. Which clause that is depends on the contract type as much as on
+        # the funding profile — a fully funded cost contract is limited by
+        # 52.232-20 (Limitation of Cost) and an incrementally funded one by
+        # 52.232-22 (Limitation of Funds), while a fixed-price award is under
+        # neither and printing one on it is a contradiction on the face of the
+        # form. `pricing` has already resolved this; the ceiling comparison
+        # stays as the check that the award really is short of its allotment.
         allotted_ceiling = sum(float(c.get("ceiling") or 0) for c in funded_clins)
         statement = f"Total amount obligated by this award: {_money(total_obligated)}."
-        if total_obligated + 0.5 < allotted_ceiling:
-            statement += (
-                " Incremental funding is subject to FAR 52.232-22, "
-                "Limitation of Funds."
-            )
+        clause = pricing.get("funding_clause")
+        if clause and total_obligated + 0.5 < allotted_ceiling:
+            statement += f" Incremental funding is subject to {clause}."
+        elif clause:
+            statement += f" Payment is subject to {clause}."
         pdf.ln(1)
         pdf.set_font("Helvetica", "B", 8)
         pdf.multi_cell(
