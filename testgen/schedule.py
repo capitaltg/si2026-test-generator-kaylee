@@ -375,10 +375,16 @@ def rate_schedule_bytes(contract, form_title, section_label, cost_section_label=
                 # Hours are already stated on the direct-labor row above.
                 hours = None
             rows += _summary_rows(clin, pricing, hours, total)
+            # The label on these rows runs across the rate column as well as the
+            # category column. It has to: "Overhead @ 48.5% of Direct Labor +
+            # Fringe" does not fit in the 52mm a labor category needs, and every
+            # one of these rows leaves the rate column blank anyway — none of
+            # them is priced at a rate per hour. A real exhibit runs the element
+            # label across the description block the same way.
+            label_w = cols[0][1] + cols[1][1]
             for label, row_hours, amount, bold in rows:
                 pdf.set_font("Helvetica", "B" if bold else "", 8)
-                pdf.cell(cols[0][1], 6, _latin1(label), border=1, align="L")
-                pdf.cell(cols[1][1], 6, "", border=1)
+                pdf.cell(label_w, 6, _latin1(label), border=1, align="L")
                 pdf.cell(
                     cols[2][1],
                     6,
