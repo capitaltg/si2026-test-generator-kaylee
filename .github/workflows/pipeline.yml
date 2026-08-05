@@ -1,0 +1,204 @@
+# Fixtura CI/CD. Modelled on slate-data's server_pipeline.yml so it matches how
+# the rest of our repos build and deploy, minus the parts Fixtura doesn't need
+# (no database service, no requirements.txt — dependencies come from
+# pyproject.toml, and there is no app version to bake in).
+#
+# Three jobs, in order of how much setup they need:
+#
+#   test      runs on every push. Needs nothing. Works today.
+#   docker    builds the image and smoke-tests it. Needs nothing. Works today.
+#   publish   pushes to ECR and restarts the deployment. Needs AWS/Docker Hub
+#             secrets and Kubernetes resources that must exist first, so it is
+#             switched OFF until the DEPLOY_ENABLED repo variable is set to
+#             'true' (see the comment on that job).
+name: Fixtura Pipeline
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
+  # No `pull_request:` trigger on purpose — `branches: '**'` already covers every
+  # branch, and adding both would run the whole pipeline twice on each PR.
+  workflow_dispatch:
+
+env:
+  # TODO(toby): confirm these two names before turning on the publish job.
+  # ECR_REPOSITORY must be an existing ECR repo; K8S_DEPLOYMENT must be an
+  # existing Deployment in the cluster (slate-data's equivalents are
+  # `visiwyg-api` and `slatedata-dev-api`).
+  ECR_REPOSITORY: fixtura
+  K8S_DEPLOYMENT: fixtura-dev
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # 3.12 to match the Dockerfile. pyproject allows >=3.9, but testing on the
+      # version the container actually runs is what catches problems that only
+      # appear in the deployed image.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ".[web]" is the optional extra in pyproject.toml that adds FastAPI and
+      # uvicorn on top of the core engine. pytest is dev-only, so it is not a
+      # declared dependency.
+      - name: Install dependencies
+        run: |
+          pip install ".[web]"
+          pip install pytest black
+
+      - name: Check code formatting
+        run: black --check .
+
+      # `python -m pytest`, not bare `pytest`: the module form puts the current
+      # directory on sys.path, and tests/test_api.py imports `server`, which
+      # lives at the repo root rather than inside the installed package.
+      - name: Run tests
+        run: python -m pytest -q
+
+  docker:
+    name: Build image and smoke-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      # Proves the Dockerfile still builds on every branch and PR. This needs no
+      # credentials and no infrastructure, which is the point: it catches a
+      # broken image before anyone tries to deploy one.
+      - name: Build image
+        run: docker build -t fixtura:ci .
+
+      # Start it the way production will, then check the three things most
+      # likely to break inside a container: the process comes up, the front end
+      # is served, and PDF generation works (the bundled federal forms and
+      # reportlab are the fragile part — a test that only hits /health would
+      # happily pass on an image that can't produce a document).
+      - name: Smoke-test the running container
+        run: |
+          docker run -d --name fixtura-ci -p 8000:8000 fixtura:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+          echo "--- health ---"
+          curl -sf http://127.0.0.1:8000/health
+          echo "--- front end is served ---"
+          curl -sf -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/
+          echo "--- SF-26 export produces a real PDF ---"
+          curl -sf -X POST http://127.0.0.1:8000/export \
+            -H 'Content-Type: application/json' \
+            -d '{"preset":"govcon_award_sf26","rows":1,"seed":42,"format":"pdf"}' \
+            -o /tmp/sf26.pdf
+          file /tmp/sf26.pdf | grep -q "PDF document" || {
+            echo "export did not return a PDF"; exit 1;
+          }
+          echo "OK"
+
+      - name: Show container logs if the smoke test failed
+        if: failure()
+        run: docker logs fixtura-ci
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f fixtura-ci || true
+
+  publish:
+    name: Publish image and deploy
+    needs: [test, docker]
+    runs-on: ubuntu-latest
+    # Deliberately gated. Four things must exist before this can succeed:
+    #   1. an ECR repository named ${{ env.ECR_REPOSITORY }}
+    #   2. repo secrets AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+    #      DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+    #   3. a Deployment named ${{ env.K8S_DEPLOYMENT }} in ctg-prod-cluster-v2
+    #      (the rollout step RESTARTS a Deployment — it does not create one)
+    #   4. a Service + Ingress + DNS + TLS cert for fixtura.capitaltg.com
+    # Until then, leaving this job to run would just paint main red. Turn it on
+    # by adding a repository variable DEPLOY_ENABLED = true
+    # (Settings -> Secrets and variables -> Actions -> Variables).
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Authenticated pulls of the python base image, so builds don't trip over
+      # Docker Hub's anonymous rate limits.
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # A version tag (1.2.3) publishes under that version; main publishes as
+      # 'latest'. Same convention as slate-data.
+      - name: Determine image tag
+        id: image_tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.tag }}
+        run: docker build . -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      # exit-code 1 means a CRITICAL vulnerability blocks the release. Note this
+      # can fail for reasons unrelated to our code — if the python:3.12-slim base
+      # image picks up a critical CVE, the fix is usually to rebuild once an
+      # updated base is published.
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.tag }}
+        with:
+          image-ref: "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.image_tag.outputs.tag }}"
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL"
+
+      - name: Push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.image_tag.outputs.tag }}
+        run: docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+      - name: Update kubeconfig
+        if: github.ref == 'refs/heads/main'
+        run: aws eks update-kubeconfig --name ctg-prod-cluster-v2 --region us-east-1
+
+      # Restarting makes the Deployment re-pull the 'latest' image. This is why
+      # the Deployment has to already exist, and why its imagePullPolicy needs to
+      # be Always for a 'latest'-tagged image to actually change anything.
+      - name: Restart deployment
+        if: github.ref == 'refs/heads/main'
+        run: kubectl rollout restart "deployment/$K8S_DEPLOYMENT"
