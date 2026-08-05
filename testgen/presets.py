@@ -28,6 +28,7 @@ Source of the rules: sample-data/NOTES-for-testgen.md (real SF-26 awards +
 from __future__ import annotations
 
 import datetime
+import random
 import string
 
 from . import contract_types, indirects
@@ -129,6 +130,11 @@ _CSV_INDIRECTS = {
 # Agencies and how each one's PIID (contract number, block 2) is shaped. The
 # {fy} slot is filled with the 2-digit fiscal year; ?=letter, #=digit via
 # Faker's bothify (seeded, so reproducible).
+#
+# `dod` marks a DoD component, because some of what a contract may state is
+# regulated by the DFARS rather than the FAR — the 3% cap DFARS 215.404-74 puts
+# on CPAF base fee is the first case, and a corpus where every agency is treated
+# as civilian would never exercise it.
 _AGENCIES = [
     {
         "name": "Department of Homeland Security",
@@ -144,11 +150,13 @@ _AGENCIES = [
         "name": "Department of the Army",
         "office": "ACC-APG",
         "piid": "W#####-{fy}-C-####",
+        "dod": True,
     },
     {
         "name": "Department of the Navy",
         "office": "NAVSEA",
         "piid": "N#####-{fy}-C-####",
+        "dod": True,
     },
     {
         "name": "Department of Veterans Affairs",
@@ -284,9 +292,13 @@ def build_contract(rng, faker, index, opts=None):
         else rng.choice(contract_types.ORDER_PRICING_TYPES)
     )
     labor_type = order_pricing if contract_type == "IDIQ" else contract_type
-    # What the type carries: its cost elements, its fee rate, and (stamped below,
-    # once the funding profile is drawn) the clause that governs its money.
-    pricing = contract_types.build_pricing(rng, contract_type, order_pricing)
+    # What the type carries: its cost elements, its fee rate and the structure the
+    # fee is paid under, and (stamped below, once the funding profile is drawn) the
+    # clause that governs its money. The agency goes in because one of those
+    # figures is a DFARS constraint on DoD work, not a free draw.
+    pricing = contract_types.build_pricing(
+        rng, contract_type, order_pricing, dod=bool(agency.get("dod"))
+    )
 
     # Office DoDAAC-style codes (the CODE boxes beside "issued by" / "administered
     # by") and the finance identifiers a processed/paid award record carries.
@@ -331,6 +343,23 @@ def build_contract(rng, faker, index, opts=None):
     total_obligated = _allocate_funding(rng, periods, effective, full_funding)
     obligation_history = _funding_actions(rng, periods, effective, full_funding, opts)
     _stamp_award_funding(periods, obligation_history)
+
+    # The award-fee plan: how a CPAF award's pool is divided into evaluation
+    # periods, and which of them have been determined as of today. Built here
+    # because it needs the priced, exercised periods it tiles onto.
+    #
+    # Its draws come from a substream of their own, derived from the PIID, and not
+    # from `rng`. A plan exists on one of seven types, so drawing it from the shared
+    # stream would make every figure after it a function of whether the type drawn
+    # happened to be CPAF — and pinning `contract_type` would then move the funding
+    # profile of an award that has nothing to do with award fee. Deriving the
+    # substream from the PIID keeps it seed-locked (same seed => same PIID => same
+    # plan) without touching the stream everything else is drawn from.
+    award_fee = contract_types.build_award_fee_plan(
+        random.Random(f"{piid}|award-fee"), pricing, periods
+    )
+    if award_fee:
+        pricing["award_fee"] = award_fee
 
     return {
         "piid": piid,
@@ -1587,6 +1616,100 @@ def _record_sheet_row(rng, faker, index, opts=None):
     }
 
 
+_AWARD_FEE_STATUS = {
+    "determined": "Determined",
+    "in_evaluation": "In Evaluation",
+    "pending": "Pending",
+}
+
+
+def _award_fee_plan_row(rng, faker, index, opts=None):
+    """The award-fee plan attached to a CPAF award.
+
+    The preset generates its own contract as CPAF rather than honoring a pinned
+    `contract_type`, because an award-fee plan attached to a firm-fixed-price
+    award is not a document that exists. Every other knob still applies — and
+    `pop_in_progress` is the one that matters here, since it is what puts some
+    evaluation periods behind today and some ahead of it.
+    """
+    opts = dict(opts or {})
+    opts["contract_type"] = "CPAF"
+    c = build_contract(rng, faker, index, opts)
+    plan = (c.get("pricing") or {}).get("award_fee") or {}
+    evaluations = plan.get("evaluations") or []
+    return {
+        "contract_no": c["piid"],
+        "contractor": c["contractor"]["name"],
+        "agency": c["agency"],
+        "contract_type": f"{c['contract_type']} (FAR {plan.get('far', '16.401(e)')})",
+        "pop": _pop(c),
+        "contracting_officer": c["contracting_officer"],
+        # The award-fee determination is the FDO's to make, not the CO's — a
+        # distinction the plan is the only document to record.
+        "fee_determining_official": faker.name(),
+        "evaluation_cadence": f"Every {plan.get('cadence_months', 6)} months",
+        "base_fee": _fmt_money(plan.get("base_fee") or 0),
+        "award_fee_pool": _fmt_money(plan.get("award_fee_pool") or 0),
+        "total_fee": _fmt_money(plan.get("total_fee") or 0),
+        # The three figures the award form cannot state, because it was signed
+        # before any of them existed.
+        "fee_earned": _fmt_money(plan.get("fee_earned") or 0),
+        "fee_forfeited": _fmt_money(plan.get("fee_forfeited") or 0),
+        "fee_at_risk": _fmt_money(plan.get("fee_at_risk") or 0),
+        "determinations_made": (
+            f"{plan.get('periods_determined', 0)} of {plan.get('periods_total', 0)} "
+            "evaluation periods determined"
+        ),
+        "evaluations": [
+            {
+                "number": str(e["number"]),
+                "period": e["contract_period"],
+                "window": f"{_fmt_date(e['start'])} - {_fmt_date(e['end'])}",
+                "available_fee": _fmt_money(e["available_fee"]),
+                "status": _AWARD_FEE_STATUS.get(e["status"], e["status"]),
+                "score": "--" if e["score"] is None else str(e["score"]),
+                "rating": e["rating"] or "--",
+                "fee_earned": (
+                    "--" if e["fee_earned"] is None else _fmt_money(e["fee_earned"])
+                ),
+            }
+            for e in evaluations
+        ],
+        "criteria": [
+            {"factor": x["factor"], "weight": f"{x['weight']}%"}
+            for x in plan.get("criteria") or []
+        ],
+        "rating_table": contract_types.award_fee_rating_table(),
+        "methodology": _AWARD_FEE_METHODOLOGY,
+    }
+
+
+# How a determination is made, as a plan states it. Two rules here are the ones a
+# fee model has to encode and neither is derivable from the numbers: a score at or
+# below the unsatisfactory threshold earns nothing at all, and fee left unearned in
+# a period is gone rather than deferred. Hard-wrapped, because it is rendered into
+# a fixed-width editable text field.
+_AWARD_FEE_METHODOLOGY = (
+    "At the end of each evaluation period the Contractor submits a "
+    "self-assessment. The\n"
+    "Performance Monitor evaluates performance against the criteria and weights "
+    "stated in\n"
+    "this plan, and the Fee Determining Official determines the adjectival rating "
+    "and the\n"
+    "resulting award fee. The determination is unilateral and is not subject to "
+    "the\n"
+    "Disputes clause.\n\n"
+    "Award fee earned is the percentage of the evaluation period's available fee\n"
+    "corresponding to the numerical score, per the rating table above (DFARS PGI\n"
+    "216.470). A score at or below 50 earns no award fee for the period.\n\n"
+    "Award fee not earned in an evaluation period is not available for award in "
+    "any\n"
+    "subsequent period and is not carried forward. Base fee is payable without "
+    "regard\n"
+    "to the rating."
+)
+
+
 def _invoice_row(rng, faker, index, opts=None):
     c = build_contract(rng, faker, index, opts)
     base = c["periods"][0] if c["periods"] else {"clins": []}
@@ -1835,6 +1958,130 @@ def record_sheet_blocks(r):
     ]
 
 
+def award_fee_plan_blocks(r):
+    return "Award Fee Plan (FAR 16.401(e))", [
+        {
+            "type": "pair",
+            "fields": [
+                ("contract_no", "Contract No.", r["contract_no"]),
+                ("contract_type", "Contract Type", r["contract_type"]),
+            ],
+        },
+        {
+            "type": "field",
+            "name": "contractor",
+            "label": "Contractor",
+            "value": r["contractor"],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("agency", "Agency", r["agency"]),
+                ("pop", "Period of Performance", r["pop"]),
+            ],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                (
+                    "fee_determining_official",
+                    "Fee Determining Official",
+                    r["fee_determining_official"],
+                ),
+                (
+                    "contracting_officer",
+                    "Contracting Officer",
+                    r["contracting_officer"],
+                ),
+            ],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("base_fee", "Base Fee (guaranteed)", r["base_fee"]),
+                ("award_fee_pool", "Award Fee Pool (at risk)", r["award_fee_pool"]),
+            ],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("evaluation_cadence", "Evaluation Cadence", r["evaluation_cadence"]),
+                ("total_fee", "Total Fee (Base + Pool)", r["total_fee"]),
+            ],
+        },
+        # The state of the pool as of today: what has been earned, what was
+        # forfeited by a determination, and what has not been determined yet.
+        # Three numbers, and no award document states any of them.
+        {
+            "type": "pair",
+            "fields": [
+                ("fee_earned", "Award Fee Earned to Date", r["fee_earned"]),
+                ("fee_forfeited", "Award Fee Forfeited", r["fee_forfeited"]),
+            ],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("fee_at_risk", "Award Fee Not Yet Determined", r["fee_at_risk"]),
+                (
+                    "determinations_made",
+                    "Determinations Made",
+                    r["determinations_made"],
+                ),
+            ],
+        },
+        {
+            "type": "table",
+            "name": "evaluations",
+            "label": "Evaluation Periods and Determinations",
+            "rows": r["evaluations"],
+            "columns": [
+                ("number", "No.", 0.06),
+                ("period", "Contract Period", 0.17),
+                ("window", "Evaluation Period", 0.22),
+                ("available_fee", "Available Fee", 0.14),
+                ("status", "Status", 0.13),
+                ("score", "Score", 0.07),
+                ("rating", "Rating", 0.11),
+                ("fee_earned", "Fee Earned", 0.10),
+            ],
+        },
+        # How the fee is evaluated goes on its own page, the way a real plan
+        # separates the fee position from the process that produced it — and an
+        # award with five exercised periods has ten evaluation rows above, which
+        # leaves no room for it anyway.
+        {"type": "pagebreak"},
+        {
+            "type": "table",
+            "name": "criteria",
+            "label": "Evaluation Criteria and Weights",
+            "rows": r["criteria"],
+            "columns": [
+                ("factor", "Evaluation Factor", 0.70),
+                ("weight", "Weight", 0.30),
+            ],
+        },
+        {
+            "type": "table",
+            "name": "rating_table",
+            "label": "Award Fee Rating Table (DFARS PGI 216.470)",
+            "rows": r["rating_table"],
+            "columns": [
+                ("rating", "Adjectival Rating", 0.45),
+                ("score", "Score", 0.25),
+                ("fee_earned", "Award Fee Earned", 0.30),
+            ],
+        },
+        {
+            "type": "prose",
+            "name": "methodology",
+            "label": "Determination Methodology",
+            "value": r["methodology"],
+            "height": 210,
+        },
+    ]
+
+
 def _award_letter_text(r):
     """Award-notice body modeled on real federal contract-award / notice-to-
     proceed letters (award reference, incremental-funding limitation, CO
@@ -2008,8 +2255,6 @@ def build_scenario(seed, opts=None):
     Left unset, the roster keeps its original shape of exactly one person per
     labor line (unchanged output for every existing caller).
     """
-    import random
-
     rng = random.Random(seed)
     faker = Faker()
     if seed is not None:
@@ -2289,6 +2534,17 @@ PRESETS = {
         "build": _award_letter_row,
         "blocks": award_letter_blocks,
     },
+    "govcon_award_fee_plan": {
+        "label": "Award Fee Plan (CPAF)",
+        "description": "The award-fee plan attached to a cost-plus-award-fee "
+        "award: the evaluation periods the pool is divided into, the criteria and "
+        "weights, and a signed determination for each period already evaluated — "
+        "so fee earned, fee forfeited and fee still at risk are all stated. "
+        "Editable fields.",
+        "kind": "doc",
+        "build": _award_fee_plan_row,
+        "blocks": award_fee_plan_blocks,
+    },
     "govcon_record_sheet": {
         "label": "Simple Contract Record",
         "description": "A compact one-page record sheet of the key contract fields "
@@ -2362,6 +2618,9 @@ PRESET_OPTIONS_BY_KEY = {
     "govcon_funding_summary": _CONTRACT_OPTS,
     "govcon_award_letter": _CONTRACT_OPTS,
     "govcon_record_sheet": _CONTRACT_OPTS,
+    # No contract_type knob: the plan is the CPAF document, and the preset pins
+    # the type it documents rather than offering to generate an empty page.
+    "govcon_award_fee_plan": [o for o in _CONTRACT_OPTS if o != "contract_type"],
     "govcon_contract_data": _CONTRACT_OPTS,
     "govcon_labor_export": ["staffing", "shared_pool"],
     "govcon_timesheet": ["staffing", "target_hours", "ot_freq", "shared_pool"],
@@ -2414,8 +2673,6 @@ def generate_preset(key, *, rows=5, seed=None, opts=None):
     if key not in PRESETS:
         valid = ", ".join(sorted(PRESETS))
         raise ValueError(f"Unknown preset '{key}'. Available: {valid}.")
-
-    import random
 
     rng = random.Random(seed)
     faker = Faker()
