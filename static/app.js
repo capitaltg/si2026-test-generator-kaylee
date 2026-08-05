@@ -456,6 +456,16 @@ const PRESET_OPTIONS = [
     max: 4,
   },
   {
+    key: "rate_variance",
+    type: "bool",
+    label: "Rates differ from their cost buildup",
+    hint:
+      "Negotiate the loaded rates a few percent away from the rates the " +
+      "contractor's indirect buildup supports — rates struck at a prior year's " +
+      "indirect rates, or discounted to win. Off by default (rates and buildup " +
+      "reconcile exactly). Use it to exercise a rate-reconciliation check.",
+  },
+  {
     key: "lcat_lines",
     type: "number",
     label: "Labor lines per CLIN",

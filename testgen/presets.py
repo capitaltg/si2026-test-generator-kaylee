@@ -30,7 +30,7 @@ from __future__ import annotations
 import datetime
 import string
 
-from . import contract_types
+from . import contract_types, indirects
 from .fields import _NAICS, gen_alnum as _alnum, gen_uei as _uei
 from .schedule import sf1449_continuation, sf26_section_b
 
@@ -40,13 +40,19 @@ from faker import Faker
 _P = "topmostSubform[0].Page1[0]."
 
 
-# --- Reference data: labor categories with 2026 fully-burdened bands ---------
-# band  = realistic loaded (fully-burdened) $/hr BEFORE any clearance premium.
+# --- Reference data: labor categories with 2026 direct-labor bands ------------
+# direct = realistic DIRECT labor $/hr — the wage, before any indirect pool and
+#          before the clearance premium. This is the generated figure: the
+#          loaded (fully-burdened) rate is built up from it and the company's
+#          indirect rates (see testgen/indirects.py), not drawn on its own.
+# band   = the loaded band the LCAT's rates land in once burdened, kept as the
+#          documented sanity range for the derived figure.
 # edu / yrs / clr = the LCAT's minimum qualification floor (the compliance
 # feature downstream cross-checks a resume against these).
 _LCATS = [
     {
         "lcat": "Administrative Support",
+        "direct": (19, 32),
         "band": (45, 75),
         "edu": "HS Diploma",
         "yrs": 1,
@@ -54,6 +60,7 @@ _LCATS = [
     },
     {
         "lcat": "Business Analyst",
+        "direct": (43, 65),
         "band": (100, 150),
         "edu": "Bachelor's",
         "yrs": 3,
@@ -61,6 +68,7 @@ _LCATS = [
     },
     {
         "lcat": "Systems Engineer",
+        "direct": (39, 58),
         "band": (90, 135),
         "edu": "Bachelor's",
         "yrs": 3,
@@ -68,6 +76,7 @@ _LCATS = [
     },
     {
         "lcat": "Software Engineer (Mid)",
+        "direct": (48, 71),
         "band": (110, 165),
         "edu": "Bachelor's",
         "yrs": 5,
@@ -75,6 +84,7 @@ _LCATS = [
     },
     {
         "lcat": "Program Manager (PMP)",
+        "direct": (56, 82),
         "band": (130, 190),
         "edu": "Bachelor's",
         "yrs": 8,
@@ -82,6 +92,7 @@ _LCATS = [
     },
     {
         "lcat": "Senior Software Engineer",
+        "direct": (67, 95),
         "band": (155, 220),
         "edu": "Bachelor's",
         "yrs": 8,
@@ -89,6 +100,7 @@ _LCATS = [
     },
     {
         "lcat": "Senior Cyber SME",
+        "direct": (78, 125),
         "band": (180, 290),
         "edu": "Master's",
         "yrs": 10,
@@ -96,7 +108,23 @@ _LCATS = [
     },
 ]
 
-_CLEARANCE_PREMIUM = {None: (0, 0), "Secret": (8, 12), "TS/SCI": (20, 30)}
+# A clearance premium is paid to the *person*, so it lands on the direct wage
+# and then burdens through the pools like the rest of it — which is why these
+# are a third of what the old loaded-rate premiums were and still come out at
+# roughly the same place on the bill rate.
+_CLEARANCE_PREMIUM = {None: (0, 0), "Secret": (3.5, 5.5), "TS/SCI": (9, 13)}
+
+# The indirect rates the flat CSV presets burden their bill rates with. Those
+# presets are ERP-style exports of one notional company's labor, generated a row
+# at a time with no contract (and so no contractor) around them, so they carry a
+# fixed mid-band rate set rather than a drawn one.
+_CSV_INDIRECTS = {
+    "fringe": 0.32,
+    "overhead": 0.45,
+    "g_and_a": 0.12,
+    "profit": 0.09,
+    "variance": 0.0,
+}
 
 # Agencies and how each one's PIID (contract number, block 2) is shaped. The
 # {fy} slot is filled with the 2-digit fiscal year; ?=letter, #=digit via
@@ -221,6 +249,14 @@ def build_contract(rng, faker, index, opts=None):
         "address": faker.address().replace("\n", ", "),
         "phone": faker.numerify("(###) ###-####"),
     }
+    # The company's indirect rates. Drawn once, here, because they are a
+    # property of the contractor and not of a contract or a labor category — one
+    # set of fringe / overhead / G&A backs every rate on every CLIN below, and
+    # would back every other contract this company holds. `rate_variance` opts
+    # into a deliberate wedge between the negotiated rates and the buildup that
+    # supports them (see indirects._VARIANCE).
+    indirect_rates = indirects.build_rate_set(rng, opts.get("rate_variance"))
+    contractor["indirect_rates"] = indirect_rates
     # contract_type is opt-pinnable to any of the seven specified types; unset
     # draws one by weight (see contract_types._SPECS — fixed-price dominates,
     # CPIF/CPAF/FPI are rare).
@@ -270,7 +306,7 @@ def build_contract(rng, faker, index, opts=None):
     if option_years is None:
         option_years = rng.randint(1, 4)
     periods = _build_periods(
-        rng, faker, effective, option_years, labor_type, pricing, opts
+        rng, faker, effective, option_years, labor_type, pricing, indirect_rates, opts
     )
 
     # Roll periods up into the total ceiling (invariant 2).
@@ -411,7 +447,9 @@ def _effective_date(rng, opts=None, option_years=0):
     return start + datetime.timedelta(days=rng.randint(0, (end - start).days))
 
 
-def _build_periods(rng, faker, effective, option_years, labor_type, pricing, opts):
+def _build_periods(
+    rng, faker, effective, option_years, labor_type, pricing, rates, opts
+):
     """A contiguous list of 12-month periods (base + options). Each period's
     ceiling is the sum of its CLINs (invariant 1); options after the first
     un-exercised one stay un-exercised (you cannot skip an option year)."""
@@ -446,7 +484,7 @@ def _build_periods(rng, faker, effective, option_years, labor_type, pricing, opt
                 still_exercised = still_exercised and started and roll
             exercised = still_exercised
 
-        clins = _build_clins(rng, faker, pi, labor_type, pricing, opts)
+        clins = _build_clins(rng, faker, pi, labor_type, pricing, rates, opts)
         ceiling = _round_money(sum(c["ceiling"] for c in clins))
         periods.append(
             {
@@ -473,7 +511,7 @@ _TASK_AREAS = [
 ]
 
 
-def _build_clins(rng, faker, period_index, labor_type, pricing, opts):
+def _build_clins(rng, faker, period_index, labor_type, pricing, rates, opts):
     """The CLINs for one period, randomized but realistic: one to three labor
     CLINs (a period is sometimes split across task areas) plus the usual — but
     not guaranteed — cost-reimbursable travel and ODC lines. Each labor CLIN's
@@ -483,9 +521,18 @@ def _build_clins(rng, faker, period_index, labor_type, pricing, opts):
     Each labor CLIN also states the cost elements its pricing type requires
     (FAR 16.2/16.3/16.4/16.6) — for a cost-reimbursement type, the estimated
     cost and the fee that sum back to the ceiling. The ceiling itself is
-    unchanged by that decomposition, so invariants 1-4 are untouched."""
+    unchanged by that decomposition, so invariants 1-4 are untouched.
+
+    Every labor CLIN also carries the cost buildup behind its rates: the direct
+    labor it prices, and each indirect pool applied to its own base, footing to
+    the CLIN's total estimated cost. A cost-type exhibit prints that buildup as
+    its pricing table (there is no loaded rate on a CPFF Section B); a
+    negotiated-rate type prints the rate table and carries the buildup in the
+    data, which is what a consumer reconciles the rates against."""
     digit = _period_digit(period_index)
     clins = []
+    fee_rate = pricing.get("fee_rate") or 0.0
+    cost_type = bool(pricing.get("cost_reimbursement"))
 
     def _next_clin():
         return f"{digit}{len(clins) + 1:03d}"
@@ -495,7 +542,9 @@ def _build_clins(rng, faker, period_index, labor_type, pricing, opts):
     areas = rng.sample(_TASK_AREAS, n_labor) if n_labor > 1 else [None]
     labor_total = 0.0
     for area in areas:
-        lines = _build_labor_lines(rng, opts.get("lcat_lines"))
+        lines = _build_labor_lines(
+            rng, opts.get("lcat_lines"), rates, fee_rate, cost_type
+        )
         ceiling = _round_money(sum(l["amount"] for l in lines))
         labor_total += ceiling
         title = (
@@ -514,6 +563,20 @@ def _build_clins(rng, faker, period_index, labor_type, pricing, opts):
             "labor_rates": lines,
         }
         clin.update(contract_types.clin_cost_elements(pricing, ceiling))
+        # The pool rows between direct labor and total estimated cost. Where the
+        # type states an estimated cost, the buildup is footed to it so the
+        # exhibit's own column adds up to the figure the CLIN carries; where it
+        # does not (T&M, FFP), cost input is the whole of the price less the
+        # profit inside the rates.
+        direct_labor = _round_money(sum(l["direct_amount"] for l in lines))
+        total_cost = clin.get("estimated_cost") or clin.get("target_cost")
+        if total_cost is None:
+            total_cost = _round_money(
+                ceiling / (1.0 + indirects.fee_for_rates(rates, fee_rate))
+            )
+        clin["direct_labor"] = direct_labor
+        clin["cost_buildup"] = indirects.buildup(direct_labor, rates, total_cost)
+        clin["total_cost_input"] = total_cost
         clins.append(clin)
 
     # Cost-reimbursable support CLINs — common, but not on every contract.
@@ -559,38 +622,69 @@ def _cost_clin(number, period_index, title, ceiling, cost_element="cost"):
     }
 
 
-def _build_labor_lines(rng, n_lines):
-    """A set of labor lines. Each line derives a loaded rate from a base salary
-    and a wrap rate (invariant 7), keeps it inside the LCAT's realistic band,
-    and books whole-FTE hours (a clean multiple of 2080, invariant 7's partner
-    #7 hours rule). The line amount is rate * hours, so the CLIN ceiling that
-    sums them reconciles exactly (invariant 4)."""
+def _build_labor_lines(rng, n_lines, rates, fee_rate, cost_type=False):
+    """A set of labor lines, each one a cost buildup rather than a bare price.
+
+    The *direct* rate is what gets drawn — the wage, inside the LCAT's direct
+    band, plus the clearance premium the person is paid. The loaded rate is then
+    derived from it through the company's indirect pools and the profit or fee
+    inside the rate (see indirects.loaded_rate), so the buildup and the printed
+    rate foot to the cent by construction. `wrap_rate` survives as a *derived*
+    figure — it is now what the pools multiply out to, not an opaque draw —
+    which keeps invariant 7 (loaded ~= base_salary/2080 * wrap) true and now
+    explains itself.
+
+    Hours stay whole FTEs (a clean multiple of 2080). The extended amount is
+    what the CLIN's own exhibit prices:
+
+      * a negotiated-rate type (T&M, FFP) prices the loaded rate x hours, which
+        is the figure its rate schedule prints;
+      * a cost type prices direct labor x hours and then burdens it, because
+        that is the order a cost buildup runs in and it makes the exhibit's
+        pool rows foot to the CLIN amount.
+
+    Either way the line amounts sum to the CLIN ceiling (invariant 4).
+    """
     n = int(n_lines) if n_lines else rng.randint(2, 4)
     picks = rng.sample(_LCATS, min(n, len(_LCATS)))
+    multiplier = indirects.total_multiplier(rates, fee_rate)
+    variance = rates.get("variance") or 0.0
     lines = []
     for spec in picks:
-        wrap = round(rng.uniform(2.0, 2.45), 2)
-        lo, hi = spec["band"]
-        base_loaded = round(rng.uniform(lo, hi), 2)  # loaded rate before clearance
+        lo, hi = spec["direct"]
+        base_direct = round(rng.uniform(lo, hi), 2)
         prem_lo, prem_hi = _CLEARANCE_PREMIUM[spec["clr"]]
         premium = round(rng.uniform(prem_lo, prem_hi), 2) if prem_hi else 0.0
-        loaded_rate = round(base_loaded + premium, 2)
-        # Back-derive the base salary that yields base_loaded at this wrap, so
-        # loaded ~= base_salary/2080 * wrap holds (invariant 7).
-        base_salary = round(base_loaded / wrap * 2080)
+        direct_rate = round(base_direct + premium, 2)
+        derived = indirects.loaded_rate(direct_rate, rates, fee_rate)
+        # What the award actually negotiated. Equal to the derived rate unless
+        # the variance knob is on, which is the case a consumer's rate
+        # reconciliation is supposed to notice.
+        loaded_rate = round(derived * (1.0 + variance), 2) if variance else derived
         fte = rng.randint(1, 6)
         est_hours = fte * 2080
+        direct_amount = _round_money(direct_rate * est_hours)
+        amount = (
+            _round_money(direct_amount * multiplier)
+            if cost_type
+            else _round_money(loaded_rate * est_hours)
+        )
         lines.append(
             {
                 "lcat": spec["lcat"],
                 "clearance": spec["clr"] or "None",
                 "min_education": spec["edu"],
                 "min_experience_yrs": spec["yrs"],
-                "base_salary": base_salary,
-                "wrap_rate": wrap,
+                "base_salary": round(direct_rate * 2080),
+                "direct_rate": direct_rate,
+                "wrap_rate": round(rates["wrap_rate"], 2),
                 "loaded_rate": loaded_rate,
+                # The rate the buildup supports. Identical to `loaded_rate`
+                # unless the variance knob put a wedge between them.
+                "derived_loaded_rate": derived,
                 "est_hours": est_hours,
-                "amount": _round_money(loaded_rate * est_hours),
+                "direct_amount": direct_amount,
+                "amount": amount,
             }
         )
     return lines
@@ -1796,13 +1890,15 @@ def award_letter_blocks(r):
 
 
 def _loaded_rate(rng, spec):
-    """A fully-burdened (loaded) bill rate for an LCAT: a rate inside the LCAT's
-    band plus its clearance premium. Same buildup as the contract labor lines."""
-    lo, hi = spec["band"]
-    base_loaded = round(rng.uniform(lo, hi), 2)
+    """A fully-burdened (loaded) bill rate for an LCAT: the direct wage inside
+    the LCAT's direct band, plus its clearance premium, burdened through the
+    indirect pools. Same buildup as the contract labor lines, against the fixed
+    rate set these ERP-style exports assume (_CSV_INDIRECTS)."""
+    lo, hi = spec["direct"]
+    base_direct = round(rng.uniform(lo, hi), 2)
     prem_lo, prem_hi = _CLEARANCE_PREMIUM[spec["clr"]]
     premium = round(rng.uniform(prem_lo, prem_hi), 2) if prem_hi else 0.0
-    return round(base_loaded + premium, 2)
+    return indirects.loaded_rate(base_direct + premium, _CSV_INDIRECTS, None)
 
 
 def _employee(faker):

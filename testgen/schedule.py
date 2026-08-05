@@ -1,14 +1,25 @@
-"""Labor-rate schedule continuation sheets.
+"""Pricing continuation sheets — the exhibit that backs a labor CLIN.
 
 A form face (SF-1449, SF-26) carries only a CLIN *summary* — item number,
-description, amount. The negotiated fully-burdened labor rates that back a
-T&M / labor CLIN live on a continuation sheet: "Continuation of SF-1449,
-Schedule of Line Items and Pricing" for the commercial-items form, or the
-Uniform Contract Format's "Section B - Supplies or Services and Prices/Costs"
-for a negotiated award (SF-26). Real awards put the rate table there; so do we.
+description, amount. What backs it lives on a continuation sheet: "Continuation
+of SF-1449, Schedule of Line Items and Pricing" for the commercial-items form,
+or the Uniform Contract Format's "Section B - Supplies or Services and
+Prices/Costs" for a negotiated award (SF-26).
 
-This module draws that sheet from a generated contract's `labor_rates` and
-returns it as PDF bytes, ready to append after the filled form. It carries the
+*What* that sheet states depends on how the contract is priced, and this module
+draws both shapes:
+
+  * a negotiated-rate award (T&M, LH, FFP) states fully-burdened hourly rates,
+    because under FAR 52.232-7(a) the rate is the price — one number covering
+    wages, indirect cost and profit;
+  * a cost-reimbursement award (CPFF, CPIF, CPAF) states a **cost buildup**,
+    because there is no price per hour to state: direct labor by category, each
+    indirect pool applied to its own base, total estimated cost, and fee as its
+    own line. A loaded rate never appears on it.
+
+Both are drawn from the generated contract's `labor_rates` and `cost_buildup`
+(generated in presets.py against the company rate set in indirects.py) and
+returned as PDF bytes, ready to append after the filled form. Both carry the
 same SIMULATED footer as the forms, so an appended page is never mistaken for a
 genuine one.
 """
@@ -17,6 +28,7 @@ from __future__ import annotations
 
 from fpdf import FPDF
 
+from . import indirects
 from .formfill import SIM_FOOTER
 from .pdf import _latin1
 
@@ -31,6 +43,28 @@ _COLS = [
     ("Min. Yrs", 15, "C", "min_experience_yrs"),
     ("Clearance", 25, "L", "clearance"),
 ]
+
+# The cost-reimbursement exhibit, which is a different table and not a variant
+# of the one above. A CPFF Section B does not state a loaded rate at all — the
+# government is not buying qualified hours at a price, it is reimbursing
+# allowable cost — so the price columns become direct labor and the pools that
+# burden it are the rows underneath (see `_buildup_rows`).
+#
+# The qualification columns come off with the price. A minimum education or a
+# clearance level is on a rate schedule to justify the rate being charged; where
+# there is no rate being charged there is nothing for them to justify, and a
+# real cost buildup does not carry them — the LCAT qualification floor lives in
+# Section H or an LCAT-description attachment instead. Every one of those fields
+# is still generated on the labor line for a consumer to read; this is only the
+# question of what the pricing exhibit prints.
+_COST_COLS = [
+    ("Labor Category (LCAT)", 84, "L", "lcat"),
+    ("Direct Rate/Hr", 34, "R", "direct_rate"),
+    ("Est. Hrs", 30, "R", "est_hours"),
+    ("Direct Labor Cost", 46, "R", "direct_amount"),
+]
+
+_MONEY_KEYS = ("loaded_rate", "amount", "direct_rate", "direct_amount")
 
 
 def _money(value):
@@ -116,15 +150,54 @@ def _summary_rows(clin, pricing, hours, extended):
     return [("CLIN Total", hours, extended, True)]
 
 
-def _table_note(clin):
+def _buildup_rows(clin):
+    """The cost-buildup rows that sit between a cost-type CLIN's direct labor
+    lines and its total-estimated-cost line, as (label, hours, amount, bold).
+
+    The direct-labor subtotal carries the hours, because on this exhibit it is
+    the hours-bearing line — the pools below it are dollar figures applied to a
+    base, and total estimated cost is a dollar figure too. Each pool names the
+    base it applies to, which is the part a reader checks: overhead loads labor
+    *and* fringe, and G&A loads everything before it.
+    """
+    rows = [
+        ("Total Direct Labor", clin.get("est_hours"), clin.get("direct_labor"), False)
+    ]
+    for pool in clin.get("cost_buildup") or []:
+        label = f"{pool['label']} @ {_pct(pool['rate'])} of {pool['base_label']}"
+        rows.append((label, None, pool["amount"], False))
+    return rows
+
+
+def _table_note(clin, rates=None):
     """The note a sheet carries under a CLIN's table, where a real award puts
     one — a short qualification of the rates above, not a restatement of them."""
-    if clin.get("profit_in_rates"):
+    if clin.get("cost_buildup") and clin.get("estimated_cost") is not None:
         return (
+            "Note: indirect rates shown are provisional billing rates "
+            "(FAR 42.704), applied to the bases stated. Costs are reimbursed as "
+            "allowable, allocable and reasonable under FAR 31.2, subject to "
+            "final indirect cost rate determination (FAR 52.216-7)."
+        )
+    if clin.get("profit_in_rates"):
+        note = (
             "Note: the fixed hourly rates above are inclusive of all direct and "
             "indirect costs and profit. Materials and other direct costs are "
             "reimbursed separately at cost, without fee (FAR 52.232-7(a))."
         )
+        # When the negotiated rates were not struck at the indirect rates the
+        # contractor now carries, say so on the face of the schedule. That is
+        # the disclosure a rate reconciliation is supposed to pick up, and a
+        # real award does carry it when the two differ.
+        variance = (rates or {}).get("variance") or 0.0
+        if variance:
+            direction = "below" if variance < 0 else "above"
+            note += (
+                f" The negotiated rates are approximately "
+                f"{abs(variance) * 100:.1f}% {direction} the rates supported by "
+                "the Contractor's current indirect rate buildup."
+            )
+        return note
     if clin.get("target_profit") is not None:
         return (
             "Note: costs incurred above the price ceiling are borne by the "
@@ -133,11 +206,11 @@ def _table_note(clin):
     return ""
 
 
-def _row_values(line):
+def _row_values(line, cols):
     out = []
-    for _, _, _, key in _COLS:
+    for _, _, _, key in cols:
         v = line.get(key)
-        if key in ("loaded_rate", "amount"):
+        if key in _MONEY_KEYS:
             v = _money(v)
         elif key == "est_hours":
             v = f"{int(v):,}" if v else ""
@@ -147,17 +220,30 @@ def _row_values(line):
     return out
 
 
-def rate_schedule_bytes(contract, form_title, section_label):
-    """Draw the labor-rate schedule for a generated contract and return PDF bytes.
+def rate_schedule_bytes(contract, form_title, section_label, cost_section_label=None):
+    """Draw the pricing schedule for a generated contract and return PDF bytes.
 
-    form_title     the sheet title, e.g. "CONTINUATION OF SF-1449".
-    section_label  the schedule heading, e.g.
-                   "SCHEDULE OF LINE ITEMS AND PRICING".
+    form_title          the sheet title, e.g. "CONTINUATION OF SF-1449".
+    section_label       the schedule heading, e.g.
+                        "SCHEDULE OF LINE ITEMS AND PRICING".
+    cost_section_label  the heading to use instead on a cost-reimbursement
+                        award, whose exhibit is a cost buildup and not a rate
+                        schedule. Falls back to `section_label`.
     """
     pdf = _SchedulePDF(unit="mm", format="Letter")
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
     usable = pdf.w - pdf.l_margin - pdf.r_margin
+
+    pricing = contract.get("pricing") or {}
+    rates = (contract.get("contractor") or {}).get("indirect_rates") or {}
+    # What kind of exhibit this is. A cost-reimbursement award does not price
+    # hours at a rate, so its sheet is a cost buildup with its own heading and
+    # its own columns.
+    cost_exhibit = bool(pricing.get("cost_reimbursement"))
+    if cost_exhibit and cost_section_label:
+        section_label = cost_section_label
+    cols = _COST_COLS if cost_exhibit else _COLS
 
     pdf.set_font("Helvetica", "B", 13)
     pdf.cell(0, 8, _latin1(form_title), new_x="LMARGIN", new_y="NEXT")
@@ -165,7 +251,6 @@ def rate_schedule_bytes(contract, form_title, section_label):
     pdf.cell(0, 6, _latin1(section_label), new_x="LMARGIN", new_y="NEXT")
 
     pdf.set_font("Helvetica", "", 9)
-    pricing = contract.get("pricing") or {}
     ident = (
         f"Contract No.: {contract.get('piid', '')}    "
         f"Contractor: {contract.get('contractor', {}).get('name', '')}    "
@@ -183,12 +268,27 @@ def rate_schedule_bytes(contract, form_title, section_label):
             new_x="LMARGIN",
             new_y="NEXT",
         )
+    # The negotiated indirect rates, stated once above the tables. A cost-type
+    # award prints them on its face because they are terms of the contract — the
+    # rates the government agreed cost would be burdened at — and every buildup
+    # below applies these same figures. They sit here, above the schedule,
+    # because that is where a Section B states the rates its exhibits use.
+    if cost_exhibit and rates:
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(
+            0,
+            5,
+            _latin1(indirects.rate_disclosure(rates)),
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        pdf.set_font("Helvetica", "", 9)
     pdf.ln(3)
 
     def table_header():
         pdf.set_font("Helvetica", "B", 8)
         pdf.set_fill_color(240, 242, 245)
-        for heading, w, _, _ in _COLS:
+        for heading, w, _, _ in cols:
             pdf.cell(w, 6, _latin1(heading), border=1, align="C", fill=True)
         pdf.ln(6)
         pdf.set_font("Helvetica", "", 8)
@@ -262,35 +362,52 @@ def rate_schedule_bytes(contract, form_title, section_label):
 
             table_header()
             for line in lines:
-                for value, (_, w, align, _key) in zip(_row_values(line), _COLS):
+                for value, (_, w, align, _key) in zip(_row_values(line, cols), cols):
                     _cell(pdf, value, w, align)
                 pdf.ln(6)
 
-            # The summary rows that close the table: the cost elements this
-            # CLIN's type states, priced in the same column as the labor lines
-            # above them (extended amounts foot to the CLIN's stated amount).
+            # What closes the table. On a cost exhibit the pool rows come first
+            # — direct labor, then each indirect pool applied to its base — and
+            # the summary block that used to foot the labor column now foots the
+            # buildup instead, which is the same block doing the same job one
+            # layer further down the cost model.
             total = sum(float(l.get("amount") or 0) for l in lines)
             hours = sum(int(l.get("est_hours") or 0) for l in lines)
-            rest = sum(w for _, w, _, _ in _COLS[4:])
-            for label, row_hours, amount, bold in _summary_rows(
-                clin, pricing, hours, total
-            ):
+            rest = sum(w for _, w, _, _ in cols[4:])
+            rows = []
+            if cost_exhibit and clin.get("cost_buildup"):
+                rows += _buildup_rows(clin)
+                # Hours are already stated on the direct-labor row above.
+                hours = None
+            rows += _summary_rows(clin, pricing, hours, total)
+            # The label on these rows runs across the rate column as well as the
+            # category column. It has to: "Overhead @ 48.5% of Direct Labor +
+            # Fringe" does not fit in the width a labor category needs, and every
+            # one of these rows leaves the rate column blank anyway — none of
+            # them is priced at a rate per hour. A real exhibit runs the element
+            # label across the description block the same way.
+            label_w = cols[0][1] + cols[1][1]
+            for label, row_hours, amount, bold in rows:
                 pdf.set_font("Helvetica", "B" if bold else "", 8)
-                pdf.cell(_COLS[0][1], 6, _latin1(label), border=1, align="L")
-                pdf.cell(_COLS[1][1], 6, "", border=1)
+                pdf.cell(label_w, 6, _latin1(label), border=1, align="L")
                 pdf.cell(
-                    _COLS[2][1],
+                    cols[2][1],
                     6,
                     _latin1(f"{row_hours:,}") if row_hours else "",
                     border=1,
                     align="R",
                 )
-                pdf.cell(_COLS[3][1], 6, _latin1(_money(amount)), border=1, align="R")
-                pdf.cell(rest, 6, "", border=1)
+                pdf.cell(cols[3][1], 6, _latin1(_money(amount)), border=1, align="R")
+                # The qualification columns, blank, where the table has them. A
+                # zero-width cell is not a no-op in fpdf — width 0 means "run to
+                # the right margin" — so the cost exhibit, whose table ends at
+                # the amount column, must skip the call entirely.
+                if rest:
+                    pdf.cell(rest, 6, "", border=1)
                 pdf.ln(6)
             pdf.set_font("Helvetica", "", 8)
 
-            note = _table_note(clin)
+            note = _table_note(clin, rates)
             if note:
                 pdf.ln(1)
                 pdf.set_font("Helvetica", "I", 7)
@@ -373,6 +490,7 @@ def sf1449_continuation(contract):
         contract,
         "CONTINUATION OF SF-1449",
         "SCHEDULE OF LINE ITEMS AND PRICING",
+        "SCHEDULE OF LINE ITEMS AND ESTIMATED COST",
     )
 
 
@@ -382,4 +500,5 @@ def sf26_section_b(contract):
         contract,
         "SECTION B - SUPPLIES OR SERVICES AND PRICES/COSTS",
         "LABOR RATE SCHEDULE (FULLY BURDENED)",
+        "COST BUILDUP AND ESTIMATED COST BY LINE ITEM",
     )
