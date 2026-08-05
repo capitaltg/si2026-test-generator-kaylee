@@ -10,7 +10,9 @@ cross-field invariants a sharp reviewer checks by adding numbers up:
     4. sum(rate * hours) on a labor CLIN == that CLIN's ceiling
     5. option-period CLINs start with the period digit (0xxx, 1xxx, 2xxx ...)
     6. periods of performance are contiguous and non-overlapping
-    7. loaded rate ~= base_salary / 2080 * wrap(2.0..2.45)
+    7. loaded rate ~= base_salary / 2080 * wrap(2.0..2.45) — 2080 because a
+       base salary is a calendar-year figure, unlike estimated direct hours
+       (see calendars)
 
 We honor them by building BOTTOM-UP: labor lines roll up into a labor CLIN
 ceiling, CLINs roll up into a period ceiling, periods roll up into the total
@@ -31,7 +33,7 @@ import datetime
 import random
 import string
 
-from . import contract_types, indirects
+from . import calendars, contract_types, indirects
 from .fields import _NAICS, gen_alnum as _alnum, gen_uei as _uei
 from .schedule import sf1449_continuation, sf26_section_b
 
@@ -589,7 +591,12 @@ def _build_clins(rng, faker, period_index, labor_type, pricing, rates, opts):
     labor_total = 0.0
     for area in areas:
         lines = _build_labor_lines(
-            rng, opts.get("lcat_lines"), rates, fee_rate, cost_type
+            rng,
+            opts.get("lcat_lines"),
+            rates,
+            fee_rate,
+            cost_type,
+            _direct_hours(opts),
         )
         ceiling = _round_money(sum(l["amount"] for l in lines))
         labor_total += ceiling
@@ -668,7 +675,20 @@ def _cost_clin(number, period_index, title, ceiling, cost_element="cost"):
     }
 
 
-def _build_labor_lines(rng, n_lines, rates, fee_rate, cost_type=False):
+def _direct_hours(opts):
+    """Chargeable hours per FTE per year — the utilisation assumption a staffing
+    plan is priced at. Defaults to calendars.DIRECT_HOURS_PER_YEAR; the
+    `direct_hours` knob pins it (2080 restores the old calendar-maximum
+    behaviour, for anyone who wants the previous figures back)."""
+    value = (opts or {}).get("direct_hours")
+    if value in (None, ""):
+        return calendars.DIRECT_HOURS_PER_YEAR
+    return max(1, int(value))
+
+
+def _build_labor_lines(
+    rng, n_lines, rates, fee_rate, cost_type=False, direct_hours=None
+):
     """A set of labor lines, each one a cost buildup rather than a bare price.
 
     The *direct* rate is what gets drawn — the wage, inside the LCAT's direct
@@ -680,8 +700,11 @@ def _build_labor_lines(rng, n_lines, rates, fee_rate, cost_type=False):
     which keeps invariant 7 (loaded ~= base_salary/2080 * wrap) true and now
     explains itself.
 
-    Hours stay whole FTEs (a clean multiple of 2080). The extended amount is
-    what the CLIN's own exhibit prices:
+    Hours are whole FTEs of *direct* hours — not of the calendar. See
+    calendars.DIRECT_HOURS_PER_YEAR: 2,080 is 52 x 40, which prices a staffing
+    plan as though nobody ever takes a holiday or a day of PTO, and over-states
+    every CLIN amount by about 10% because amount = rate x hours. The extended
+    amount is what the CLIN's own exhibit prices:
 
       * a negotiated-rate type (T&M, FFP) prices the loaded rate x hours, which
         is the figure its rate schedule prints;
@@ -692,6 +715,7 @@ def _build_labor_lines(rng, n_lines, rates, fee_rate, cost_type=False):
     Either way the line amounts sum to the CLIN ceiling (invariant 4).
     """
     n = int(n_lines) if n_lines else rng.randint(2, 4)
+    direct_hours = direct_hours or calendars.DIRECT_HOURS_PER_YEAR
     picks = rng.sample(_LCATS, min(n, len(_LCATS)))
     multiplier = indirects.total_multiplier(rates, fee_rate)
     variance = rates.get("variance") or 0.0
@@ -708,7 +732,7 @@ def _build_labor_lines(rng, n_lines, rates, fee_rate, cost_type=False):
         # reconciliation is supposed to notice.
         loaded_rate = round(derived * (1.0 + variance), 2) if variance else derived
         fte = rng.randint(1, 6)
-        est_hours = fte * 2080
+        est_hours = fte * direct_hours
         direct_amount = _round_money(direct_rate * est_hours)
         amount = (
             _round_money(direct_amount * multiplier)
@@ -721,7 +745,13 @@ def _build_labor_lines(rng, n_lines, rates, fee_rate, cost_type=False):
                 "clearance": spec["clr"] or "None",
                 "min_education": spec["edu"],
                 "min_experience_yrs": spec["yrs"],
-                "base_salary": round(direct_rate * 2080),
+                # The annual salary the wage implies, which is still a CALENDAR
+                # figure: a salaried employee is paid for the holidays and the PTO
+                # that direct hours exclude. Dividing an annual salary by direct
+                # hours instead would over-state the wage by the same 10% the old
+                # est_hours over-stated the CLIN.
+                "base_salary": round(direct_rate * calendars.CALENDAR_HOURS_PER_YEAR),
+                "direct_hours_per_year": direct_hours,
                 "direct_rate": direct_rate,
                 "wrap_rate": round(rates["wrap_rate"], 2),
                 "loaded_rate": loaded_rate,
@@ -2546,7 +2576,8 @@ def build_scenario(seed, opts=None):
 
     opts.staffing (optional float) sizes the roster relative to how the contract
     is actually staffed on paper. Each labor line estimates N FTEs from its hours
-    (est_hours / 2080); the roster gets round(staffing * N) real people on that
+    (est_hours / its direct hours per FTE); the roster gets round(staffing * N)
+    real people on that
     line — so `staffing=1.0` fields a roster that burns the contract on plan,
     `0.25` a lightly-staffed / under-burning one, `1.2` a hot / over-running one.
     Left unset, the roster keeps its original shape of exactly one person per
@@ -2587,7 +2618,12 @@ def build_scenario(seed, opts=None):
     for clin in (active or {}).get("clins", []):
         for line in clin.get("labor_rates", []):
             if staffing is not None:
-                fte = max(1, round((line.get("est_hours") or 2080) / 2080))
+                # Back out the FTE count the line was priced at, using the same
+                # direct-hours figure it was priced with — dividing by the
+                # calendar year here would under-count every line by ~10% and
+                # quietly under-staff the roster.
+                per_fte = line.get("direct_hours_per_year") or _direct_hours(opts)
+                fte = max(1, round((line.get("est_hours") or per_fte) / per_fte))
                 n_people = max(1, round(staffing * fte))
             else:
                 n_people = 1
@@ -2618,7 +2654,47 @@ def build_scenario(seed, opts=None):
     if (opts or {}).get("pop_in_progress") and active:
         earliest = active["pop_start"]
     weeks = _week_list(earliest)
-    return {"contract": contract, "roster": roster, "weeks": weeks}
+    # Each person's leave, as a schedule rather than a per-week coin flip: blocks
+    # of contiguous weeks, seasonally skewed, seed-locked to the person.
+    #
+    # Drawn from a substream per person, derived from the PIID and the employee id
+    # — not from the shared stream. Two reasons. A plan has to be stable for a
+    # given person no matter which row of the grid asks about it (row 40 and row
+    # 400 are the same person in different weeks and must agree), and a schedule
+    # that consumed shared-stream draws would move every figure after it.
+    piid = contract.get("piid") or ""
+    leave_plans = {
+        member["employee_id"]: calendars.leave_plan(
+            random.Random(f"{piid}|leave|{member['employee_id']}"), weeks
+        )
+        for member in roster
+    }
+    # The forward-looking half of the same schedule: dated absence past today, for
+    # a live contract. Built here so it shares the roster and the substreams, and
+    # so it is one flat list a preset can lay out row by row.
+    forward = calendars.future_weeks(weeks[-1] if weeks else datetime.date.today(), 26)
+    planned_leave = [
+        dict(
+            row,
+            employee=member["employee"],
+            employee_id=member["employee_id"],
+            labor_category=member["labor_category"],
+            contract_no=piid,
+            charge_code=member["clin"],
+        )
+        for member in roster
+        for row in calendars.planned_absences(
+            random.Random(f"{piid}|leave-ahead|{member['employee_id']}"), forward
+        )
+    ]
+    planned_leave.sort(key=lambda r: (r["week_ending"], r["employee_id"]))
+    return {
+        "contract": contract,
+        "roster": roster,
+        "weeks": weeks,
+        "leave_plans": leave_plans,
+        "planned_leave": planned_leave,
+    }
 
 
 def _active_period(contract):
@@ -2713,10 +2789,23 @@ def _timesheet_row(rng, faker, index, opts=None):
     generate_preset caps the row count at roster_size * n_weeks so the grid never
     wraps back onto itself.
 
-    Hours default to a standard ~40-hour week with occasional PTO and light
-    overtime, and are tunable per the scenario opts:
+    Hours default to a standard ~40-hour week with light overtime, and are tunable
+    per the scenario opts:
       * target_hours (default 40) — the regular weekly target.
-      * ot_freq (default 0.35)    — chance a week carries overtime (2-8 hrs)."""
+      * ot_freq (default 0.35)    — chance a week carries overtime (2-8 hrs).
+
+    The week's non-billable time is not noise. Federal holidays come off the
+    calendar on their real observed dates and hit everyone in the same week; PTO
+    comes from the person's own leave schedule in contiguous blocks (see
+    calendars); and a stray sick day is what is left to draw per week.
+
+    `total_hours` is the BILLABLE quantity — regular plus overtime, and nothing
+    else. It used to roll leave in with it, and since a consumer prices
+    `total_hours` against the CLIN's loaded rate, that billed PTO as direct labor:
+    double-counted, once inside the fringe component of the loaded rate and again
+    as hours. Leave and holidays are indirect costs recovered through the fringe
+    pool (FAR 31.205-6), never a direct charge to a CLIN. `paid_hours` carries the
+    all-in figure a payroll system wants."""
     piid, member = _scenario_member(opts, index)
     scenario = (opts or {}).get("_scenario")
     if member:
@@ -2746,11 +2835,29 @@ def _timesheet_row(rng, faker, index, opts=None):
     target = float(_target) if _target not in (None, "") else 40.0
     _otf = (opts or {}).get("ot_freq")
     ot_freq = float(_otf) if _otf not in (None, "") else 0.35
-    # Regular hours make the target week (less any PTO that week); overtime rides
-    # on top when it occurs. PTO is occasional, so most weeks land right at target.
-    leave = float(rng.choice([0, 0, 0, 0, 0, 0, 8, 16]))
-    reg = round(max(0.0, target - leave), 1)
+    # An unscheduled absence — the sick day nobody plans. Scheduled PTO comes from
+    # the leave plan below, so this is only the residue. The draw stays here, and
+    # stays one draw, so the overtime roll after it keeps its place in the stream.
+    incidental = float(rng.choice([0, 0, 0, 0, 0, 0, 0, 8]))
+    # Federal holidays: real observed dates, everyone in the scenario off in the
+    # same week (see calendars.holiday_hours).
+    holiday = calendars.holiday_hours(week_ending)
+    # Scheduled vacation for this person in this week, in contiguous blocks.
+    planned = (
+        ((scenario or {}).get("leave_plans") or {})
+        .get(emp_id, {})
+        .get(week_ending, 0.0)
+    )
+    # A week has only so many hours in it. Holidays are fixed by the calendar and
+    # win; scheduled leave fills what is left; a sick day cannot be taken on a day
+    # already off.
+    leave = min(float(planned) + incidental, max(0.0, target - holiday))
+    reg = round(max(0.0, target - holiday - leave), 1)
     ot = float(rng.choice([2, 4, 6, 8])) if rng.random() < ot_freq else 0.0
+    # Nobody works overtime in a week they were mostly out. The rolls above are
+    # taken either way so the stream does not depend on the leave schedule.
+    if reg < target / 2:
+        ot = 0.0
     return {
         "employee": name,
         "employee_id": emp_id,
@@ -2760,9 +2867,60 @@ def _timesheet_row(rng, faker, index, opts=None):
         "labor_category": lcat,
         "reg_hours": reg,
         "ot_hours": ot,
-        "leave_hours": leave,
-        "total_hours": round(reg + ot + leave, 1),
+        "holiday_hours": round(holiday, 1),
+        "leave_hours": round(leave, 1),
+        # Billable: what may be charged to the CLIN. Regular + overtime, full stop.
+        "total_hours": round(reg + ot, 1),
+        # All-in: what the person is paid for. Never a direct charge.
+        "paid_hours": round(reg + ot + holiday + leave, 1),
         "approved_by": faker.name(),
+    }
+
+
+def _planned_leave_row(rng, faker, index, opts=None):
+    """One dated future absence: who is out, which week, how many hours, what kind
+    of leave and whether it is approved yet.
+
+    This is the piece with no substitute. A timesheet says who WAS out; a
+    what-if projection needs to know who WILL be. The rows come from the same
+    per-person leave schedule the timesheet's PTO comes from, dated forward of the
+    last timesheet week, so the history and the plan are one coherent story rather
+    than two unrelated datasets.
+
+    Without a shared scenario there is nobody to be absent, so the preset falls
+    back to a self-contained line the way the other labor exports do.
+    """
+    scenario = (opts or {}).get("_scenario")
+    rows = (scenario or {}).get("planned_leave") or []
+    if rows:
+        row = rows[index % len(rows)]
+        return {
+            "employee": row["employee"],
+            "employee_id": row["employee_id"],
+            "labor_category": row["labor_category"],
+            "contract_no": row["contract_no"],
+            "charge_code": row["charge_code"],
+            "week_ending": row["week_ending"],
+            "leave_hours": row["leave_hours"],
+            "leave_type": row["leave_type"],
+            "status": row["status"],
+        }
+    spec = rng.choice(_LCATS)
+    piid, clin = _charge_ref(rng, faker)
+    name, emp_id = _employee(faker)
+    weeks = calendars.future_weeks(datetime.date.today(), 26)
+    plan = calendars.planned_absences(rng, weeks)
+    row = plan[index % len(plan)] if plan else {}
+    return {
+        "employee": name,
+        "employee_id": emp_id,
+        "labor_category": spec["lcat"],
+        "contract_no": piid,
+        "charge_code": clin,
+        "week_ending": row.get("week_ending", weeks[0]),
+        "leave_hours": row.get("leave_hours", 40.0),
+        "leave_type": row.get("leave_type", "Vacation"),
+        "status": row.get("status", "Approved"),
     }
 
 
@@ -2891,6 +3049,19 @@ PRESETS = {
         # roster x weeks grid so a person is never double-booked in a week.
         "grid_weekly": True,
     },
+    "govcon_planned_leave": {
+        "label": "Planned Leave Schedule",
+        "description": "Dated future absence for the same roster the timesheets "
+        "cover: who is out which week, how many hours, leave type and approval "
+        "status. Forward of the last timesheet week — the input a what-if burn "
+        "projection needs and that historical timesheets cannot provide.",
+        "kind": "data",
+        "build": _planned_leave_row,
+        "scenario": True,
+        # The schedule is as long as the roster's plans are; asking for more rows
+        # than that would wrap and duplicate absences.
+        "row_source": "planned_leave",
+    },
 }
 
 
@@ -2917,6 +3088,10 @@ _CONTRACT_OPTS = [
     # "provisional", "final" or "pair" — attaches the indirect rate agreement the
     # award's rates are billed under. Unset omits it, as it always has been.
     "rate_agreement",
+    # Chargeable hours per FTE per year, the utilisation a staffing plan is priced
+    # at. Unset = calendars.DIRECT_HOURS_PER_YEAR (1880); 2080 restores the old
+    # calendar-maximum pricing.
+    "direct_hours",
     "n_mods",
     "mod_types",
 ]
@@ -2936,8 +3111,16 @@ PRESET_OPTIONS_BY_KEY = {
     # the type it documents rather than offering to generate an empty page.
     "govcon_award_fee_plan": [o for o in _CONTRACT_OPTS if o != "contract_type"],
     "govcon_contract_data": _CONTRACT_OPTS,
-    "govcon_labor_export": ["staffing", "shared_pool"],
-    "govcon_timesheet": ["staffing", "target_hours", "ot_freq", "shared_pool"],
+    "govcon_labor_export": ["staffing", "shared_pool", "direct_hours"],
+    "govcon_timesheet": [
+        "staffing",
+        "target_hours",
+        "ot_freq",
+        "shared_pool",
+        "direct_hours",
+        "pop_in_progress",
+    ],
+    "govcon_planned_leave": ["staffing", "shared_pool", "pop_in_progress"],
 }
 
 
@@ -3009,6 +3192,11 @@ def generate_preset(key, *, rows=5, seed=None, opts=None):
         sc = opts["_scenario"]
         grid = len(sc["roster"]) * max(1, len(sc.get("weeks") or []))
         n = min(n, grid)
+    # A preset whose rows ARE a precomputed list (the leave schedule) is capped at
+    # its length for the same reason: wrapping would emit the same absence twice.
+    source = PRESETS[key].get("row_source")
+    if source and opts.get("_scenario"):
+        n = min(n, max(1, len(opts["_scenario"].get(source) or [])))
 
     build = PRESETS[key]["build"]
     return [build(rng, faker, i, opts) for i in range(n)]
