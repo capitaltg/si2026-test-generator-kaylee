@@ -122,23 +122,58 @@ def _summary_rows(clin, pricing, hours, extended):
     if clin.get("estimated_cost") is not None:
         label = {
             "fixed_fee": "Fixed Fee",
-            "award_fee": "Base Fee + Award Fee Pool",
             "target_fee": "Target Fee",
         }.get(element, "Fee")
         cost_label = (
             "Target Cost" if element == "target_fee" else "Total Estimated Cost"
         )
-        return [
-            (cost_label, hours, clin["estimated_cost"], False),
-            (f"{label} ({rate})", None, clin.get("fee") or 0, False),
-            ("Total CLIN Amount (Cost + Fee)", None, extended, True),
-        ]
+        rows = [(cost_label, hours, clin["estimated_cost"], False)]
+        if clin.get("award_fee_pool") is not None:
+            # Award fee is two elements, not one, and printing their sum as "fee"
+            # loses the only thing that matters about it: the base fee is paid
+            # whatever happens and the pool has to be earned. A real CPAF Section B
+            # prices them as two lines.
+            rows += [
+                (
+                    f"Base Fee ({_pct(clin.get('base_fee_rate'))})",
+                    None,
+                    clin.get("base_fee") or 0,
+                    False,
+                ),
+                (
+                    f"Award Fee Pool ({_pct(clin.get('award_fee_rate'))})",
+                    None,
+                    clin["award_fee_pool"],
+                    False,
+                ),
+            ]
+        else:
+            rows.append((f"{label} ({rate})", None, clin.get("fee") or 0, False))
+        total_label = (
+            "Total Target Amount (Target Cost + Target Fee)"
+            if element == "target_fee"
+            else "Total CLIN Amount (Cost + Fee)"
+        )
+        rows.append((total_label, None, extended, True))
+        if clin.get("max_fee") is not None:
+            # The brackets the fee adjustment stops at (FAR 16.304). They are
+            # dollar figures the contract states, so they are priced lines — and
+            # they sit below the target the way a price ceiling sits below a target
+            # price, because neither is part of the sum above it. The cost points
+            # they bind at go in the note under the table.
+            rows += [
+                ("Minimum Fee (cost overrun)", None, clin["min_fee"], False),
+                ("Maximum Fee (cost underrun)", None, clin["max_fee"], False),
+            ]
+        return rows
     if clin.get("target_profit") is not None:
         return [
             ("Target Cost", hours, clin["target_cost"], False),
             (f"Target Profit ({rate})", None, clin["target_profit"], False),
             ("Target Price", None, clin.get("target_price"), True),
             ("Price Ceiling (FAR 16.403)", None, clin.get("ceiling_price"), False),
+            ("Minimum Profit (cost overrun)", None, clin.get("min_profit"), False),
+            ("Maximum Profit (cost underrun)", None, clin.get("max_profit"), False),
         ]
     if clin.get("firm_price") is not None:
         # A firm-fixed-price CLIN states one figure. Naming it "Firm-Fixed Price"
@@ -169,16 +204,48 @@ def _buildup_rows(clin):
     return rows
 
 
+def _share_ratio_text(clin):
+    ratio = clin.get("share_ratio")
+    return f"{ratio[0]}/{ratio[1]}" if ratio else ""
+
+
+def _fee_note(clin):
+    """The sentence that qualifies a cost-type CLIN's fee, where the fee is not
+    simply a figure. What a consumer cannot get from the table is *how the fee
+    moves*: an award-fee pool is earned by determination and forfeited if it is
+    not, and an incentive fee slides with cost between two brackets."""
+    if clin.get("award_fee_pool") is not None:
+        return (
+            "The base fee is payable without regard to performance; the award fee "
+            "pool is earned only to the extent determined by the Fee Determining "
+            "Official under the Award Fee Plan (FAR 16.401(e)), and award fee not "
+            "earned in an evaluation period is not available for award in any "
+            "subsequent period."
+        )
+    if clin.get("max_fee") is not None:
+        return (
+            f"Fee adjusts from the target fee by the {_share_ratio_text(clin)} "
+            "Government/Contractor share ratio as allowable cost varies from the "
+            "target cost (FAR 16.304). The maximum fee is reached at a total "
+            f"allowable cost of {_money(clin.get('max_fee_at_cost'))} and the "
+            f"minimum fee at {_money(clin.get('min_fee_at_cost'))}; outside that "
+            "range the fee is fixed at the bracket."
+        )
+    return ""
+
+
 def _table_note(clin, rates=None):
     """The note a sheet carries under a CLIN's table, where a real award puts
     one — a short qualification of the rates above, not a restatement of them."""
     if clin.get("cost_buildup") and clin.get("estimated_cost") is not None:
-        return (
+        note = (
             "Note: indirect rates shown are provisional billing rates "
             "(FAR 42.704), applied to the bases stated. Costs are reimbursed as "
             "allowable, allocable and reasonable under FAR 31.2, subject to "
             "final indirect cost rate determination (FAR 52.216-7)."
         )
+        fee_note = _fee_note(clin)
+        return f"{note} {fee_note}" if fee_note else note
     if clin.get("profit_in_rates"):
         note = (
             "Note: the fixed hourly rates above are inclusive of all direct and "
@@ -201,7 +268,11 @@ def _table_note(clin, rates=None):
     if clin.get("target_profit") is not None:
         return (
             "Note: costs incurred above the price ceiling are borne by the "
-            "Contractor; profit adjusts by the share ratio (FAR 16.403)."
+            f"Contractor; profit adjusts by the {_share_ratio_text(clin)} "
+            "Government/Contractor share ratio as cost varies from the target, "
+            f"reaching the maximum profit at {_money(clin.get('max_profit_at_cost'))} "
+            f"and the minimum at {_money(clin.get('min_profit_at_cost'))} "
+            "(FAR 16.403)."
         )
     return ""
 
@@ -480,6 +551,44 @@ def rate_schedule_bytes(contract, form_title, section_label, cost_section_label=
             new_y="NEXT",
         )
         pdf.set_font("Helvetica", "", 8)
+
+    # The fee and payment clauses the award carries, and — on an award-fee
+    # contract — the plan that says how the pool is earned. A Section B is not
+    # Section I, so these are listed the way an award lists a clause whose text it
+    # does not print: incorporated by reference under FAR 52.252-2. What makes them
+    # worth stating here is that the list follows the type — 52.216-8 on a CPFF
+    # award, 52.216-10 on a CPIF award, neither on a T&M one.
+    clauses = pricing.get("fee_clause_text") or []
+    plan = pricing.get("award_fee")
+    if clauses or plan:
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(20, 60, 120)
+        pdf.cell(
+            0,
+            7,
+            _latin1("FEE AND PAYMENT CLAUSES INCORPORATED BY REFERENCE"),
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", "", 8)
+        for clause in clauses:
+            pdf.multi_cell(usable, 5, _latin1(clause), new_x="LMARGIN", new_y="NEXT")
+        if plan:
+            pdf.multi_cell(
+                usable,
+                5,
+                _latin1(
+                    "Award Fee Plan (Attachment J-1), FAR "
+                    f"{plan.get('far', '16.401(e)')} - "
+                    f"{plan.get('periods_total', 0)} evaluation periods on a "
+                    f"{plan.get('cadence_months', 6)}-month cycle, award fee pool "
+                    f"{_money(plan.get('award_fee_pool'))}."
+                ),
+                new_x="LMARGIN",
+                new_y="NEXT",
+            )
 
     return bytes(pdf.output())
 
