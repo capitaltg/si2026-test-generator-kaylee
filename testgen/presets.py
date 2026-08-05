@@ -52,9 +52,16 @@ _P = "topmostSubform[0].Page1[0]."
 #          documented sanity range for the derived figure.
 # edu / yrs / clr = the LCAT's minimum qualification floor (the compliance
 # feature downstream cross-checks a resume against these).
+# family = the qualification lineage the category belongs to. Levels inside one
+#          family are a career (Software Engineer (Mid) -> Senior Software
+#          Engineer); categories in different families are different careers, and
+#          nobody holds the floors of both Administrative Support and Senior
+#          Software Engineer. A shared-pool person is bound to one family so the
+#          people this generator emits stay people (#70).
 _LCATS = [
     {
         "lcat": "Administrative Support",
+        "family": "admin",
         "direct": (19, 32),
         "band": (45, 75),
         "edu": "HS Diploma",
@@ -63,6 +70,7 @@ _LCATS = [
     },
     {
         "lcat": "Business Analyst",
+        "family": "analysis",
         "direct": (43, 65),
         "band": (100, 150),
         "edu": "Bachelor's",
@@ -71,6 +79,7 @@ _LCATS = [
     },
     {
         "lcat": "Systems Engineer",
+        "family": "engineering",
         "direct": (39, 58),
         "band": (90, 135),
         "edu": "Bachelor's",
@@ -79,6 +88,7 @@ _LCATS = [
     },
     {
         "lcat": "Software Engineer (Mid)",
+        "family": "engineering",
         "direct": (48, 71),
         "band": (110, 165),
         "edu": "Bachelor's",
@@ -87,6 +97,7 @@ _LCATS = [
     },
     {
         "lcat": "Program Manager (PMP)",
+        "family": "management",
         "direct": (56, 82),
         "band": (130, 190),
         "edu": "Bachelor's",
@@ -95,6 +106,7 @@ _LCATS = [
     },
     {
         "lcat": "Senior Software Engineer",
+        "family": "engineering",
         "direct": (67, 95),
         "band": (155, 220),
         "edu": "Bachelor's",
@@ -103,6 +115,7 @@ _LCATS = [
     },
     {
         "lcat": "Senior Cyber SME",
+        "family": "cyber",
         "direct": (78, 125),
         "band": (180, 290),
         "edu": "Master's",
@@ -2526,14 +2539,77 @@ _SHARED_POOL_SEED = 8675309
 _SHARED_POOL_SIZE = 80
 
 
+def _lcat_family(lcat):
+    """The qualification lineage a labor category belongs to, or None if it isn't
+    one of the reference categories (a contract can carry a hand-written LCAT)."""
+    for row in _LCATS:
+        if row["lcat"] == lcat:
+            return row.get("family")
+    return None
+
+
+# The family draw for pool members: one entry per category, so a lineage's odds
+# track its share of the seats it could fill. Engineering spans three of the seven
+# categories and gets three of the seven tickets. A uniform draw over the five
+# families would leave engineering seats chasing a fifth of the pool and shed far
+# more cross-contract overlap than binding people to a lineage needs to cost.
+_POOL_FAMILIES = [row["family"] for row in _LCATS]
+
+
 def _shared_pool():
     """A fixed, seed-stable pool of people reused across contracts when
     opts.shared_pool is on, so the same employee can appear on more than one
     contract. That overlap is what lets a portfolio tool flag anyone booked past
-    100% across contracts. Off by default — each contract keeps its own roster."""
+    100% across contracts. Off by default — each contract keeps its own roster.
+
+    Each person carries a qualification lineage (#70). Before, the pool was
+    identity only — a (name, id) pair — and the roster loop took the category off
+    whatever *seat* the person happened to land in, so one shared person could
+    read "Administrative Support · Business Analyst · Senior Software Engineer".
+    That is not a career: those floors are a HS diploma and a Master's, and no
+    single set of credentials satisfies both. It was harmless while the only
+    downstream consumer counted hours, and stopped being harmless when Runway #69
+    made a person one global set of credentials for #66 to check — a person
+    spanning both is unrepresentable, and the compliance feature would flag
+    artifacts of data generation rather than realistic findings.
+
+    Level variation *inside* a family is kept, deliberately: Software Engineer
+    (Mid) on one contract and Senior Software Engineer on another is career
+    progression, and it is exactly the legitimate case #66 exists to handle.
+
+    The family is drawn from a per-person substream keyed off the employee id —
+    the same discipline `leave_plans` uses — so it is stable for a given person
+    and consumes none of the pool's own draws.
+    """
     fk = Faker()
     fk.seed_instance(_SHARED_POOL_SEED)
-    return [_employee(fk) for _ in range(_SHARED_POOL_SIZE)]
+    people = []
+    for _ in range(_SHARED_POOL_SIZE):
+        name, emp_id = _employee(fk)
+        fam = random.Random(f"family|{emp_id}").choice(_POOL_FAMILIES)
+        people.append((name, emp_id, fam))
+    return people
+
+
+def _pool_seat(pool, offset, k, family):
+    """The next shared-pool person whose lineage fits this seat.
+
+    Returns (name, employee_id, next_k), or (None, None, next_k) when the pool has
+    nobody of that lineage — the caller then fields a fresh unique employee, which
+    is the intended trade: a slightly lower overlap rate for people who read as
+    people.
+
+    Probes forward along the same stride rather than giving up on the first miss.
+    A plain first-pick-or-fall-back would have cut the cross-contract overlap to
+    roughly a quarter of what it was, and #66 needs a meaningful number of people
+    billing different categories on different contracts to have anything to check.
+    """
+    n = len(pool)
+    for probe in range(n):
+        name, emp_id, fam = pool[(offset + (k + probe) * 13) % n]
+        if fam == family:
+            return name, emp_id, k + probe + 1
+    return None, None, k + 1
 
 
 def _week_list(earliest=None):
@@ -2600,8 +2676,13 @@ def build_scenario(seed, opts=None):
     # Opt-in shared roster: about every third person is drawn from a fixed
     # cross-contract pool (offset by PIID) so a realistic handful recur on other
     # contracts — the rest stay unique to this contract. That partial overlap is
-    # what the portfolio conflict detector reads; LCAT/CLIN/rate stay this
+    # what the portfolio conflict detector reads; CLIN and rate stay this
     # contract's. (Sharing everyone would read as "all staff booked 500%".)
+    #
+    # The category no longer does. A shared person carries a qualification lineage
+    # and only fills seats inside it, because downstream they are one person with
+    # one set of credentials (#70) — a seat whose lineage doesn't fit goes to a
+    # fresh unique employee instead.
     pool = _shared_pool() if (opts or {}).get("shared_pool") else None
     # Spread each contract's shared block across the pool (×7 decorrelates similar
     # PIIDs) so shared people mostly land on just two contracts, not all of them.
@@ -2628,13 +2709,18 @@ def build_scenario(seed, opts=None):
             else:
                 n_people = 1
             for _ in range(n_people):
+                name = None
                 if pool and seat % 5 == 0:
                     # Scatter shared picks across the pool (stride 13, coprime to
                     # 80) so a shared person usually lands on just a couple of
                     # contracts rather than a contiguous block hitting them all.
-                    name, emp_id = pool[(pool_offset + shared_k * 13) % len(pool)]
-                    shared_k += 1
-                else:
+                    # The seat only goes to someone whose lineage fits the category
+                    # it bills — a shared person no longer inherits whatever seat
+                    # they land in (#70).
+                    name, emp_id, shared_k = _pool_seat(
+                        pool, pool_offset, shared_k, _lcat_family(line["lcat"])
+                    )
+                if name is None:
                     name, emp_id = _employee(faker)
                 seat += 1
                 roster.append(
