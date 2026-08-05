@@ -144,7 +144,11 @@ def _draw_block(c, form, idx, b, y):
         # of its own. `_draw_page` breaks when a block leaves it short of room, so
         # returning a y below that threshold is all this has to do — the check
         # stays in one place instead of two.
-        return MARGIN
+        #
+        # Unless the block before it already ran the page out and _draw_page
+        # broke for it: the page is then already fresh, and breaking again emits
+        # a blank one.
+        return y if y >= PAGE_H - MARGIN else MARGIN
     return y
 
 

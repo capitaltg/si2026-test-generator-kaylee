@@ -32,6 +32,8 @@ The bands are the ones a real services contractor's rates fall in: fringe
 
 from __future__ import annotations
 
+import datetime
+
 _FRINGE = (0.25, 0.40)
 _OVERHEAD = (0.30, 0.60)
 _GA = (0.08, 0.18)
@@ -167,3 +169,170 @@ def rate_disclosure(rates):
         f"Overhead {rates['overhead'] * 100:.1f}%  |  "
         f"G&A {rates['g_and_a'] * 100:.1f}%"
     )
+
+
+# --- The rate agreement -------------------------------------------------------
+# The rates above are stated in a document, and the whole reason that document is
+# worth generating is that the rates in it are *not final*. A contractor bills at
+# provisional rates during the year (FAR 42.704), submits an incurred-cost
+# proposal within six months of fiscal year end (FAR 52.216-7(d)), and final
+# rates are determined after it (FAR 42.705). The difference reprices every hour
+# already billed — which is why the useful artifact is a provisional/final PAIR
+# for one fiscal year, not a single letter.
+
+# How far a pool moves between the provisional rate billed and the final rate
+# determined. The direction is either way; the ORDERING is the content of this
+# table and is not left to three independent draws. Overhead moves most because
+# it is volume-sensitive — the same fixed pool spread over less direct labor
+# yields a higher rate. G&A moves less. Fringe moves least: it is nearly
+# proportional to the labor it loads, so there is little for volume to swing.
+# The bands do not overlap, so the ordering holds by construction.
+_FINAL_DELTA = {
+    "overhead": (0.022, 0.055),
+    "g_and_a": (0.009, 0.021),
+    "fringe": (0.002, 0.008),
+}
+
+# Year-over-year drift in a company's negotiated rates. Same ordering, smaller
+# magnitudes — a rate set moves less between years than a provisional set moves
+# on its way to final.
+_DRIFT = {
+    "overhead": (0.010, 0.030),
+    "g_and_a": (0.004, 0.009),
+    "fringe": (0.001, 0.003),
+}
+
+# Who determines the rates. DCMA negotiates them; DCAA audits the proposal they
+# come out of. DCMA is the more common signatory on the letter itself.
+_COGNISANT = (
+    ("DCMA", "Defense Contract Management Agency"),
+    ("DCAA", "Defense Contract Audit Agency"),
+)
+
+_AGREEMENT_MODES = ("provisional", "final", "pair")
+
+# A pool rate can be negotiated low, but not to nothing.
+_MIN_POOL_RATE = 0.01
+
+
+def fiscal_year(d):
+    """The federal fiscal year a date falls in — FY runs Oct 1 to Sep 30, so
+    October through December belong to the NEXT calendar year's FY."""
+    return d.year + 1 if d.month >= 10 else d.year
+
+
+def _shift(rates, bands, rng):
+    """A rate set moved off `rates` by one signed delta per pool.
+
+    Two draws per pool, always in the same order, so the magnitudes come out of
+    the bands they belong to and the volatility ordering in `bands` holds.
+    """
+    out = dict(rates)
+    for key, (lo, hi) in bands.items():
+        magnitude = lo + (hi - lo) * rng.random()
+        sign = 1.0 if rng.random() < 0.5 else -1.0
+        out[key] = round(max(_MIN_POOL_RATE, rates[key] + sign * magnitude), 4)
+    out["wrap_rate"] = wrap_rate(out)
+    return out
+
+
+def _agreement(fiscal, rates, status, cognisant, rng):
+    """One rate agreement / billing rate letter for one fiscal year.
+
+    The application base is carried per pool alongside the rate, because the base
+    matters as much as the rate does and is the part a summary drops: 45% of
+    labor-plus-fringe and 45% of direct labor are different numbers.
+    """
+    # Final rates are determined after the incurred-cost proposal, which is due
+    # six months after fiscal year end. The lag is drawn whatever the status, so
+    # asking for provisional rather than final cannot shift the substream.
+    lag = 180 + int(210 * rng.random())
+    fy_end = datetime.date(fiscal, 9, 30)
+    final = status == "final"
+    return {
+        "fiscal_year": fiscal,
+        "fiscal_year_label": f"FY{fiscal}",
+        "fy_start": datetime.date(fiscal - 1, 10, 1),
+        "fy_end": fy_end,
+        "status": status,
+        "far_authority": "FAR 42.705" if final else "FAR 42.704",
+        "determination_date": (
+            fy_end + datetime.timedelta(days=lag) if final else None
+        ),
+        "cognisant_agency": cognisant[0],
+        "cognisant_agency_name": cognisant[1],
+        "pools": [
+            {
+                "key": key,
+                "label": label,
+                "base_label": base_label,
+                "rate": rates[key],
+            }
+            for key, label, base_label in _POOLS
+        ],
+        "rates": {key: rates[key] for key, _, _ in _POOLS},
+        "wrap_rate": rates["wrap_rate"],
+    }
+
+
+def build_rate_agreements(rng, rates, start, end, mode="provisional"):
+    """One rate set per fiscal year the award spans, as the rate agreement states
+    them.
+
+    The first fiscal year carries the company's own rates verbatim — the ones
+    every loaded rate on the award was derived from — so the letter and the award
+    reconcile by construction instead of being two independent draws. Later
+    fiscal years drift off it, which means a consumer pricing a charge by the set
+    covering its week gets a different answer either side of a fiscal year
+    boundary. That is correct, and is what fiscal-year-keyed rate storage is for.
+
+    `mode` is one of "provisional" (default), "final", or "pair" — the pair being
+    a provisional AND a final set for the SAME fiscal year, which is the only
+    shape a rate-variance or true-up consumer can be built against.
+
+    `rng` is expected to be a substream of its own (derived from the PIID), not
+    the shared stream: an agreement exists only when a knob asks for one, so
+    drawing it from the shared stream would make every figure after it a function
+    of whether the knob was set. Within this function the draws are unconditional
+    for the same reason — the mode selects from what was drawn, it does not
+    change what gets drawn.
+    """
+    if mode not in _AGREEMENT_MODES:
+        mode = "provisional"
+    cognisant = _COGNISANT[0] if rng.random() < 0.7 else _COGNISANT[1]
+    current = dict(rates)
+    out = []
+    for i, fiscal in enumerate(range(fiscal_year(start), fiscal_year(end) + 1)):
+        # Year one is the award's own rates; every later year drifts off the year
+        # before it (not off the final set — a final determination for FY n does
+        # not reset the provisional rates negotiated for FY n+1).
+        if i:
+            current = _shift(current, _DRIFT, rng)
+        provisional = _agreement(fiscal, current, "provisional", cognisant, rng)
+        final = _agreement(
+            fiscal, _shift(current, _FINAL_DELTA, rng), "final", cognisant, rng
+        )
+        if mode == "final":
+            out.append(final)
+        elif mode == "pair" and i == 0:
+            out.extend((provisional, final))
+        else:
+            out.append(provisional)
+    return out
+
+
+def rate_variance(provisional, final):
+    """The pool-by-pool difference between a provisional set and the final set
+    for the same fiscal year, in percentage points — the delta that reprices
+    every hour billed at the provisional rates."""
+    return [
+        {
+            "key": pool["key"],
+            "label": pool["label"],
+            "base_label": pool["base_label"],
+            "provisional": pool["rate"],
+            "final": final["rates"][pool["key"]],
+            "delta": round(final["rates"][pool["key"]] - pool["rate"], 4),
+        }
+        for pool in provisional["pools"]
+    ]

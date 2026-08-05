@@ -361,6 +361,23 @@ def build_contract(rng, faker, index, opts=None):
     if award_fee:
         pricing["award_fee"] = award_fee
 
+    # The rate agreement the printed rates point at — schedule._table_note already
+    # calls them provisional under FAR 42.704 and subject to final determination
+    # under 52.216-7, and this is the document that sentence refers to.
+    #
+    # Opt-in: absent unless `rate_agreement` asks for it, and drawn from a
+    # PIID-derived substream for exactly the reason the award-fee plan is. A knob
+    # must not move the stream every other figure comes out of.
+    agreement_mode = opts.get("rate_agreement")
+    if agreement_mode:
+        contractor["rate_agreements"] = indirects.build_rate_agreements(
+            random.Random(f"{piid}|rate-agreement"),
+            indirect_rates,
+            effective,
+            periods[-1]["pop_end"],
+            agreement_mode if agreement_mode is not True else "provisional",
+        )
+
     return {
         "piid": piid,
         "solicitation_no": faker.bothify(
@@ -1710,6 +1727,151 @@ _AWARD_FEE_METHODOLOGY = (
 )
 
 
+_RATE_STATUS = {
+    "provisional": "Provisional (billing) rates",
+    "final": "Final negotiated rates",
+}
+
+
+def _rate_pct(value):
+    return f"{float(value) * 100:.2f}%"
+
+
+def _rate_agreement_row(rng, faker, index, opts=None):
+    """The indirect rate agreement behind an award's rates.
+
+    Defaults to the provisional/final PAIR for the award's first fiscal year,
+    because a single letter is the part a consumer can already infer from the
+    award's own rate disclosure, and the pair is the part it cannot. The
+    `rate_agreement` knob still pins a single-letter mode.
+    """
+    opts = dict(opts or {})
+    if not opts.get("rate_agreement"):
+        opts["rate_agreement"] = "pair"
+    c = build_contract(rng, faker, index, opts)
+    contractor = c["contractor"]
+    agreements = contractor.get("rate_agreements") or []
+    letter = agreements[0]
+    # The pair, when there is one: same fiscal year, one provisional and one final.
+    pair = next(
+        (
+            a
+            for a in agreements[1:]
+            if a["fiscal_year"] == letter["fiscal_year"]
+            and a["status"] != letter["status"]
+        ),
+        None,
+    )
+    variance = indirects.rate_variance(letter, pair) if pair else []
+
+    def _pool_rows(a):
+        return [
+            {
+                "pool": p["label"],
+                "base": p["base_label"],
+                "rate": _rate_pct(p["rate"]),
+            }
+            for p in a["pools"]
+        ]
+
+    return {
+        "contract_no": c["piid"],
+        "contractor": contractor["name"],
+        "contractor_address": contractor["address"],
+        "cage": contractor["cage"],
+        "uei": contractor["uei"],
+        "agency": c["agency"],
+        "fiscal_year": letter["fiscal_year_label"],
+        "fy_period": f"{_fmt_date(letter['fy_start'])} - {_fmt_date(letter['fy_end'])}",
+        "status": _RATE_STATUS.get(letter["status"], letter["status"]),
+        "far_authority": letter["far_authority"],
+        "cognisant": f"{letter['cognisant_agency']} - {letter['cognisant_agency_name']}",
+        # A provisional letter has no determination date — what it has is the date
+        # the proposal that produces one is due, six months after fiscal year end
+        # (FAR 52.216-7(d)). Labelling the field by which one it is keeps the page
+        # from stating a determination beside rates that have not had one.
+        "determination_label": (
+            "Determined On"
+            if letter["determination_date"]
+            else "Final Rate Proposal Due (FAR 52.216-7(d))"
+        ),
+        "determination_date": _fmt_date(
+            letter["determination_date"]
+            or (letter["fy_end"] + datetime.timedelta(days=182))
+        ),
+        "pools": _pool_rows(letter),
+        "wrap_rate": f"{letter['wrap_rate']:.4f}",
+        # The final set for the same year, and what it does to the rates already
+        # billed. Empty on a single-letter mode.
+        "final_status": (
+            _RATE_STATUS["final"] if pair else "No final determination in this document"
+        ),
+        "final_authority": pair["far_authority"] if pair else "--",
+        "final_determination_date": (
+            _fmt_date(pair["determination_date"]) if pair else "--"
+        ),
+        "final_pools": _pool_rows(pair) if pair else [],
+        "final_wrap_rate": f"{pair['wrap_rate']:.4f}" if pair else "--",
+        "variance": [
+            {
+                "pool": v["label"],
+                "provisional": _rate_pct(v["provisional"]),
+                "final": _rate_pct(v["final"]),
+                "delta": f"{v['delta'] * 100:+.2f} pts",
+            }
+            for v in variance
+        ],
+        # Every other fiscal year the award spans. Rates drift year over year, so
+        # a multi-year award has more than one set and pricing a charge against
+        # the wrong year's set is a real error to be able to reproduce.
+        "other_years": [
+            {
+                "fiscal_year": a["fiscal_year_label"],
+                "status": a["status"].title(),
+                "fringe": _rate_pct(a["rates"]["fringe"]),
+                "overhead": _rate_pct(a["rates"]["overhead"]),
+                "g_and_a": _rate_pct(a["rates"]["g_and_a"]),
+                "wrap_rate": f"{a['wrap_rate']:.4f}",
+            }
+            for a in agreements
+            if a["fiscal_year"] != letter["fiscal_year"]
+        ],
+        "statement": _RATE_AGREEMENT_STATEMENT,
+    }
+
+
+# What the letter says, and the two sentences that make the document worth
+# generating: the rates are billable now, and they are not the rates that will
+# finally apply. Hard-wrapped for a fixed-width editable text field.
+_RATE_AGREEMENT_STATEMENT = (
+    "The indirect cost rates stated above are established for billing purposes "
+    "for the\n"
+    "fiscal year shown, in accordance with FAR 42.704. The Contractor is "
+    "authorized to\n"
+    "bill at these rates on all cost-reimbursement and time-and-materials work,\n"
+    "including the contract cited above.\n\n"
+    "These rates are PROVISIONAL. They are subject to adjustment, upward or "
+    "downward,\n"
+    "at any time during the year, and to final determination after the fiscal "
+    "year ends.\n"
+    "The Contractor shall submit a final indirect cost rate proposal within six "
+    "months\n"
+    "of the end of its fiscal year (FAR 52.216-7(d)). Final rates are determined "
+    "under\n"
+    "FAR 42.705 and apply retroactively to the whole fiscal year.\n\n"
+    "Amounts billed at provisional rates are therefore subject to repricing once "
+    "final\n"
+    "rates are determined. The difference is settled by adjustment voucher; it is "
+    "not\n"
+    "waived by the government's payment of the provisional amounts.\n\n"
+    "Each rate applies to the base stated beside it. A rate quoted without its "
+    "base is\n"
+    "not usable: overhead applied to direct labor and overhead applied to labor "
+    "plus\n"
+    "fringe are different amounts of money."
+)
+
+
 def _invoice_row(rng, faker, index, opts=None):
     c = build_contract(rng, faker, index, opts)
     base = c["periods"][0] if c["periods"] else {"clins": []}
@@ -2080,6 +2242,141 @@ def award_fee_plan_blocks(r):
             "height": 210,
         },
     ]
+
+
+_RATE_POOL_COLUMNS = [
+    ("pool", "Indirect Cost Pool", 0.34),
+    ("base", "Application Base", 0.44),
+    ("rate", "Rate", 0.22),
+]
+
+
+def rate_agreement_blocks(r):
+    blocks = [
+        {
+            "type": "pair",
+            "fields": [
+                ("contractor", "Contractor", r["contractor"]),
+                ("cage", "CAGE Code", r["cage"]),
+            ],
+        },
+        {
+            "type": "field",
+            "name": "contractor_address",
+            "label": "Contractor Address",
+            "value": r["contractor_address"],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("fiscal_year", "Fiscal Year", r["fiscal_year"]),
+                ("fy_period", "Fiscal Year Period", r["fy_period"]),
+            ],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("status", "Rate Status", r["status"]),
+                ("far_authority", "Authority", r["far_authority"]),
+            ],
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("cognisant", "Cognisant Agency", r["cognisant"]),
+                ("contract_no", "Applicable Contract", r["contract_no"]),
+            ],
+        },
+        {
+            "type": "table",
+            "name": "pools",
+            "label": "Indirect Cost Rates - Provisional",
+            "rows": r["pools"],
+            "columns": _RATE_POOL_COLUMNS,
+        },
+        {
+            "type": "pair",
+            "fields": [
+                ("wrap_rate", "Cost Wrap (pools compounded)", r["wrap_rate"]),
+                (
+                    "determination_date",
+                    r["determination_label"],
+                    r["determination_date"],
+                ),
+            ],
+        },
+    ]
+    # The final set and the variance it creates. A single-letter document has
+    # neither, and printing empty tables for them would state a determination that
+    # has not happened.
+    if r["final_pools"]:
+        blocks += [
+            {
+                "type": "table",
+                "name": "final_pools",
+                "label": f"Indirect Cost Rates - Final ({r['final_authority']})",
+                "rows": r["final_pools"],
+                "columns": _RATE_POOL_COLUMNS,
+            },
+            {
+                "type": "pair",
+                "fields": [
+                    (
+                        "final_wrap_rate",
+                        "Final Cost Wrap",
+                        r["final_wrap_rate"],
+                    ),
+                    (
+                        "final_determination_date",
+                        "Determined On",
+                        r["final_determination_date"],
+                    ),
+                ],
+            },
+            {
+                "type": "table",
+                "name": "variance",
+                "label": "Rate Variance - Provisional to Final",
+                "rows": r["variance"],
+                "columns": [
+                    ("pool", "Indirect Cost Pool", 0.34),
+                    ("provisional", "Provisional", 0.22),
+                    ("final", "Final", 0.22),
+                    ("delta", "Change", 0.22),
+                ],
+            },
+        ]
+    if r["other_years"]:
+        blocks.append(
+            {
+                "type": "table",
+                "name": "other_years",
+                "label": "Rates for Other Fiscal Years in the Period of Performance",
+                "rows": r["other_years"],
+                "columns": [
+                    ("fiscal_year", "Fiscal Year", 0.18),
+                    ("status", "Status", 0.20),
+                    ("fringe", "Fringe", 0.15),
+                    ("overhead", "Overhead", 0.16),
+                    ("g_and_a", "G&A", 0.15),
+                    ("wrap_rate", "Wrap", 0.16),
+                ],
+            }
+        )
+    # The statement goes on a page of its own: the tables above already run most
+    # of a page on a multi-year pair, and the terms are what a reader turns to
+    # after the rates rather than beside them.
+    blocks += [
+        {"type": "pagebreak"},
+        {
+            "type": "prose",
+            "name": "statement",
+            "label": "Terms",
+            "value": r["statement"],
+            "height": 330,
+        },
+    ]
+    return "Indirect Cost Rate Agreement (FAR 42.704 / 42.705)", blocks
 
 
 def _award_letter_text(r):
@@ -2545,6 +2842,17 @@ PRESETS = {
         "build": _award_fee_plan_row,
         "blocks": award_fee_plan_blocks,
     },
+    "govcon_rate_agreement": {
+        "label": "Indirect Rate Agreement",
+        "description": "The provisional billing rate letter behind an award's "
+        "rates (FAR 42.704): each indirect pool with its rate AND the base it "
+        "applies to, plus the final determined rates for the same fiscal year and "
+        "the variance between them — the pair that reprices every hour already "
+        "billed. Editable fields.",
+        "kind": "doc",
+        "build": _rate_agreement_row,
+        "blocks": rate_agreement_blocks,
+    },
     "govcon_record_sheet": {
         "label": "Simple Contract Record",
         "description": "A compact one-page record sheet of the key contract fields "
@@ -2606,6 +2914,9 @@ _CONTRACT_OPTS = [
     "set_aside",
     "option_years",
     "lcat_lines",
+    # "provisional", "final" or "pair" — attaches the indirect rate agreement the
+    # award's rates are billed under. Unset omits it, as it always has been.
+    "rate_agreement",
     "n_mods",
     "mod_types",
 ]
@@ -2618,6 +2929,9 @@ PRESET_OPTIONS_BY_KEY = {
     "govcon_funding_summary": _CONTRACT_OPTS,
     "govcon_award_letter": _CONTRACT_OPTS,
     "govcon_record_sheet": _CONTRACT_OPTS,
+    # The rate agreement IS this document, so the knob here only picks which of
+    # the three shapes it takes; unset gives the pair rather than nothing.
+    "govcon_rate_agreement": _CONTRACT_OPTS,
     # No contract_type knob: the plan is the CPAF document, and the preset pins
     # the type it documents rather than offering to generate an empty page.
     "govcon_award_fee_plan": [o for o in _CONTRACT_OPTS if o != "contract_type"],
