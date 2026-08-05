@@ -515,6 +515,19 @@ const PRESET_OPTIONS = [
     hint: "Emit the whole obligation trail as a sequence of SF-30s — one PDF per mod (P00001, P00002 …) from a single contract — instead of one form per contract. Preview shows them stacked; Export downloads a ZIP you can feed a mod-ingest one file at a time.",
   },
   {
+    key: "direct_hours",
+    type: "number",
+    label: "Direct hours per FTE/year",
+    hint:
+      "The utilisation a staffing plan is priced at. Blank = 1880, the realistic " +
+      "figure once eleven federal holidays and typical PTO come out of the year. " +
+      "Set 2080 for the calendar maximum (every hour of every week billable), " +
+      "which over-states every CLIN amount by about 10%.",
+    min: 1000,
+    max: 2080,
+    placeholder: "1880",
+  },
+  {
     key: "staffing",
     type: "number",
     label: "Staffing level",
