@@ -9,9 +9,10 @@ lay down AcroForm text fields pre-filled with the generated value.
 
 A caller supplies a `blocks` function: record -> (title, [block, ...]). Each
 block is a small dict describing one piece of the layout (a labelled field, a
-side-by-side pair, a prose area, or a table). The renderer walks the blocks top
-to bottom, drawing labels and placing editable fields. Field names are prefixed
-per record so multiple records in one PDF never collide.
+side-by-side pair, a prose area, a table, or an explicit page break). The
+renderer walks the blocks top to bottom, drawing labels and placing editable
+fields. Field names are prefixed per record so multiple records in one PDF never
+collide.
 
 Every page carries the same SIMULATED footer as the real filled forms.
 """
@@ -138,6 +139,12 @@ def _draw_block(c, form, idx, b, y):
         return y - h - 12
     if t == "table":
         return _draw_table(c, form, idx, b, y)
+    if t == "pagebreak":
+        # An explicit break, for a document with a section that belongs on a page
+        # of its own. `_draw_page` breaks when a block leaves it short of room, so
+        # returning a y below that threshold is all this has to do — the check
+        # stays in one place instead of two.
+        return MARGIN
     return y
 
 
