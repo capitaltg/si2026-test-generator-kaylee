@@ -466,6 +466,22 @@ const PRESET_OPTIONS = [
       "reconcile exactly). Use it to exercise a rate-reconciliation check.",
   },
   {
+    key: "rate_agreement",
+    type: "select",
+    label: "Indirect rate agreement",
+    hint:
+      "Attach the rate letter the award's indirect rates are billed under " +
+      "(FAR 42.704) — each pool with the base it applies to. 'Pair' also states " +
+      "the final determined rates for the same fiscal year, which reprice every " +
+      "hour already billed at the provisional ones. Blank = no letter.",
+    choices: [
+      ["", "None"],
+      ["provisional", "Provisional billing rates"],
+      ["final", "Final determined rates"],
+      ["pair", "Provisional + final pair"],
+    ],
+  },
+  {
     key: "lcat_lines",
     type: "number",
     label: "Labor lines per CLIN",
