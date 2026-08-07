@@ -22,12 +22,15 @@ inside it. What these tests pin:
   4. Cross-contract overlap survives, because that overlap is what the portfolio
      conflict detector reads and what gives #66 anything to check.
   5. The family draw is a per-person substream: it does not move any other figure.
+  6. And that overlap stays a handful — a shared *roster* is a different artifact,
+     and only the floor under (4) was ever pinned. See the two ceiling tests below.
 """
 
 from __future__ import annotations
 
 import random
 from collections import defaultdict
+from itertools import combinations
 
 from faker import Faker
 
@@ -130,6 +133,59 @@ def test_the_pool_is_off_by_default():
     plain = {m["employee_id"] for m in build_scenario(1, {"staffing": 1.5})["roster"]}
     other = {m["employee_id"] for m in build_scenario(2, {"staffing": 1.5})["roster"]}
     assert not (plain & other)
+
+
+# --------------------------------------------- and the ceiling on that overlap
+
+
+def _rosters(n_contracts=12, staffing=1.5):
+    return {
+        seed: {
+            m["employee_id"]
+            for m in build_scenario(seed, {"shared_pool": True, "staffing": staffing})[
+                "roster"
+            ]
+        }
+        for seed in range(1, n_contracts + 1)
+    }
+
+
+def test_no_two_contracts_are_staffed_by_the_same_people():
+    """The floor above has a ceiling, and only the floor was pinned.
+
+    A demo database ingested into Runway had 10 of one contract's 11 people also
+    charging another contract full-time, generated before the pool was tightened to
+    one seat in five. Every one of them was a physically impossible human, and once
+    Runway learned to measure hours against the whole person (#116) they took over
+    the running-hot panel on both contracts — 1 finding became 9, none of them about
+    anything the PM could act on.
+
+    "A realistic handful recur" is the design. A shared *roster* is not, and nothing
+    here said so. Currently the worst pair sits at ~17%; a third is loose enough not
+    to fail on a reshuffle and tight enough to catch a roster.
+    """
+    rosters = _rosters()
+    for a, b in combinations(sorted(rosters), 2):
+        overlap = rosters[a] & rosters[b]
+        smaller = min(len(rosters[a]), len(rosters[b]))
+        assert len(overlap) <= smaller / 3, (
+            f"contracts {a} and {b} share {len(overlap)} of {smaller} people — "
+            "that is a shared roster, not a handful of recurring names"
+        )
+
+
+def test_most_of_a_contracts_roster_is_its_own():
+    """The pairwise check above passes if a contract leaks a little to everyone, so
+    this pins the same rule from the contract's own side: the majority of anyone's
+    roster works only for them."""
+    rosters = _rosters()
+    for seed, roster in rosters.items():
+        others = set().union(*(r for s, r in rosters.items() if s != seed))
+        shared = len(roster & others)
+        assert shared <= len(roster) / 3, (
+            f"contract {seed}: {shared} of {len(roster)} people also charge "
+            "another contract"
+        )
 
 
 # ------------------------------------------------------------ the lineage itself
